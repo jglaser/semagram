@@ -65,6 +65,24 @@ def bvp_loss(params, cfg: Config, phi, tokens, key):
     return (nll * mask).sum() / jnp.maximum(mask.sum(), 1)
 
 
+def infill_loss(params, cfg: Config, phi, tokens):
+    """Clamp both endpoints, mask the whole interior.
+
+    This is the target conditioning pattern on its own.  The any-order objective
+    above has to learn every conditional at once -- for these tasks that means
+    inversion at every index gap -- and averages its loss over masks where the
+    answer is not determined at all.  Training on the pattern you evaluate
+    separates "two-sided conditioning is hard" from "any-order is hard".
+    """
+    L = tokens.shape[1]
+    q = jnp.arange(1, L - 1)
+    inp = tokens.at[:, q].set(cfg.p)
+    logits = forward(params, cfg, inp, phi)
+    lp = jax.nn.log_softmax(logits, axis=-1)
+    nll = -jnp.take_along_axis(lp, tokens[..., None], axis=-1)[..., 0]
+    return nll[:, 1:-1].mean()
+
+
 def train(cfg: Config, tc: TrainConfig, phi, train_seqs: np.ndarray,
           objective: str, verbose: bool = False) -> Tuple[Dict[str, Any], list]:
     key = jax.random.PRNGKey(tc.seed)
@@ -80,6 +98,9 @@ def train(cfg: Config, tc: TrainConfig, phi, train_seqs: np.ndarray,
     elif objective == "bvp":
         def loss_fn(p, batch, k):
             return bvp_loss(p, cfg, phi, batch, k)
+    elif objective == "infill":
+        def loss_fn(p, batch, k):
+            return infill_loss(p, cfg, phi, batch)
     else:
         raise ValueError(objective)
 
@@ -91,12 +112,13 @@ def train(cfg: Config, tc: TrainConfig, phi, train_seqs: np.ndarray,
 
     rng = np.random.default_rng(tc.seed)
     history = []
+    every = max(1, min(250, tc.steps // 8))
     for i in range(tc.steps):
         sel = rng.integers(0, train_seqs.shape[0], size=tc.batch_size)
         batch = jnp.asarray(train_seqs[sel])
         key, k_step = jax.random.split(key)
         params, opt_state, loss = step(params, opt_state, batch, k_step)
-        if (i + 1) % 250 == 0:
+        if (i + 1) % every == 0 or (i + 1) == tc.steps:
             history.append((i + 1, float(loss)))
             if verbose:
                 print(f"    step {i+1:5d}  loss {float(loss):.4f}", flush=True)

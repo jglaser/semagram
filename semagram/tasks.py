@@ -1,97 +1,76 @@
+"""Sequence families over Z_p, all of which are two-point boundary value problems.
+
+additive        x_i = (x_0 + i*s) mod p            group: (Z_p, +)
+multiplicative  x_i = (x_0 * s^i) mod p            group: (Z_p*, x)
+permuted        additive, then the alphabet is relabelled by a random bijection
+
+The point of `multiplicative` is that it is exactly as learnable as `additive`
+-- same alphabet, same sequence length, same "two endpoints determine the
+interior" structure, a cyclic group underneath -- but the cyclic group is
+Z_{p-1} acting through discrete logarithm, not Z_p acting by translation.  An
+additive-character embedding is therefore in the *wrong coordinates* for it.
+
+That is what makes it a better control than `permuted`.  Permuting the alphabet
+destroys learnability for every fiber at once, so the comparison comes back
+void (which is what happened in the first grid).  The multiplicative task keeps
+the task learnable and moves only the coordinate system.
 """
-Tasks.  Each returns (tokens, visible) with visible=1 where the site is clamped.
 
-`bridge` is the decisive one: the masked span is a deterministic function of
-*both* the material before it and the material after it.  It is constructed
-precisely to separate a boundary-value solver from a left-to-right one, and it
-is reported as such -- an autoregressive model cannot see the right boundary,
-so it is at chance on the span no matter how well it fits the data.
+from __future__ import annotations
 
-`antipode` tests the ring topology instead: each site is determined by the site
-diametrically opposite, so the required information is always at maximum
-distance along the loop.
-
-`palindrome` is the reflection control, and the reason the odd-phase fix
-matters -- a model with exact reflection symmetry gets this for free while
-being unable to tell "dog bites man" from "man bites dog".
-"""
+import math
 
 import numpy as np
 
 
-def bridge(rng, batch, k=8, vocab=16, op="revcopy"):
-    """[ P | M | S ] on a ring of length 3k; M is a function of BOTH ends.
+def _require_unique_interior(gap: int, order: int, name: str) -> None:
+    """The interior is recoverable from the endpoints iff gcd(L-1, order) == 1."""
+    g = math.gcd(gap, order)
+    if g != 1:
+        raise ValueError(
+            f"{name}: gcd(L-1={gap}, group order={order}) = {g} != 1, so the "
+            f"endpoints do not determine a unique interior. Pick another "
+            f"(p, seq_len)."
+        )
 
-    op="revcopy"  M = reverse(S)        -- needs the right boundary, easy to fit
-    op="mix"      M = S where P even    -- needs both boundaries
-    op="modsum"   M = (P + S) mod vocab -- also needs both, but modular
-                  arithmetic is a grokking-scale problem and will sit at chance
-                  for thousands of steps; it is here as the hard setting, not
-                  as a smoke test.
-    """
-    n = 3 * k
-    P = rng.integers(0, vocab, size=(batch, k))
-    S = rng.integers(0, vocab, size=(batch, k))
-    if op == "revcopy":
-        M = S[:, ::-1]
-    elif op == "mix":
-        M = np.where(P % 2 == 0, S, P)
+
+def additive(p: int, seq_len: int) -> np.ndarray:
+    _require_unique_interior(seq_len - 1, p, "additive")
+    x0 = np.arange(p, dtype=np.int64)[:, None, None]
+    s = np.arange(p, dtype=np.int64)[None, :, None]
+    i = np.arange(seq_len, dtype=np.int64)[None, None, :]
+    return ((x0 + s * i) % p).reshape(-1, seq_len)
+
+
+def multiplicative(p: int, seq_len: int) -> np.ndarray:
+    """Values live in Z_p* = {1..p-1}; 0 never occurs."""
+    _require_unique_interior(seq_len - 1, p - 1, "multiplicative")
+    vals = np.arange(1, p, dtype=np.int64)
+    cur = np.repeat(vals[:, None], p - 1, axis=1)          # rows: x0, cols: s
+    s = vals[None, :]
+    out = []
+    for _ in range(seq_len):
+        out.append(cur.copy())
+        cur = (cur * s) % p
+    return np.stack(out, axis=-1).reshape(-1, seq_len)
+
+
+def permuted(p: int, seq_len: int, seed: int = 0) -> np.ndarray:
+    perm = np.random.default_rng(seed).permutation(p)
+    return perm[additive(p, seq_len)]
+
+
+FAMILIES = {"additive": additive, "multiplicative": multiplicative,
+            "permuted": permuted}
+
+
+def build(task: str, p: int, seq_len: int, train_frac: float, seed: int):
+    """-> (train, test) arrays of shape (N, seq_len)."""
+    if task == "permuted":
+        seqs = permuted(p, seq_len, seed=seed)
     else:
-        M = (P + S) % vocab
-    tokens = np.concatenate([P, M, S], axis=1)
-    visible = np.ones((batch, n), dtype=np.float32)
-    visible[:, k : 2 * k] = 0.0
-    return tokens.astype(np.int32), visible
-
-
-def antipode(rng, batch, half=12, vocab=16, span=6, seed=0):
-    """x_{i + n/2} = perm[x_i].  Mask a contiguous arc of length `span`."""
-    n = 2 * half
-    perm = np.random.default_rng(seed).permutation(vocab)
-    A = rng.integers(0, vocab, size=(batch, half))
-    tokens = np.concatenate([A, perm[A]], axis=1)
-    visible = np.ones((batch, n), dtype=np.float32)
-    starts = rng.integers(0, n, size=batch)
-    idx = (starts[:, None] + np.arange(span)[None, :]) % n
-    np.put_along_axis(visible, idx, 0.0, axis=1)
-    return tokens.astype(np.int32), visible
-
-
-def palindrome(rng, batch, half=12, vocab=16, span=6):
-    n = 2 * half
-    A = rng.integers(0, vocab, size=(batch, half))
-    tokens = np.concatenate([A, A[:, ::-1]], axis=1)
-    visible = np.ones((batch, n), dtype=np.float32)
-    starts = rng.integers(0, n, size=batch)
-    idx = (starts[:, None] + np.arange(span)[None, :]) % n
-    np.put_along_axis(visible, idx, 0.0, axis=1)
-    return tokens.astype(np.int32), visible
-
-
-class CharText:
-    """Char-level loops carved out of a corpus, with a random arc masked."""
-
-    def __init__(self, path, n=48, span=12):
-        with open(path) as f:
-            text = f.read()
-        self.chars = sorted(set(text))
-        self.stoi = {c: i for i, c in enumerate(self.chars)}
-        self.data = np.array([self.stoi[c] for c in text], dtype=np.int32)
-        self.vocab = len(self.chars)
-        self.n, self.span = n, span
-
-    def __call__(self, rng, batch):
-        starts = rng.integers(0, len(self.data) - self.n, size=batch)
-        tokens = np.stack([self.data[s : s + self.n] for s in starts])
-        visible = np.ones((batch, self.n), dtype=np.float32)
-        ms = rng.integers(0, self.n, size=batch)
-        idx = (ms[:, None] + np.arange(self.span)[None, :]) % self.n
-        np.put_along_axis(visible, idx, 0.0, axis=1)
-        return tokens, visible
-
-
-REGISTRY = {
-    "bridge": (bridge, dict(vocab=16, n=24, span=8)),
-    "antipode": (antipode, dict(vocab=16, n=24, span=6)),
-    "palindrome": (palindrome, dict(vocab=16, n=24, span=6)),
-}
+        seqs = FAMILIES[task](p, seq_len)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(seqs.shape[0])
+    n_train = int(round(train_frac * seqs.shape[0]))
+    return seqs[order[:n_train]], seqs[order[n_train:]]
