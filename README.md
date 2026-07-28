@@ -194,52 +194,75 @@ one was handed. If that happens here then "1.54x at one third the parameters"
 is a fact about a budget rather than about braids. `scaling.py` sweeps both
 axes one at a time, re-matching the transformer at every point.
 
-**Data, at fixed width (`d = 32`, 6000 steps):**
+**Data, at fixed width (`d = 32`, 6000 steps, three seeds per cell):**
 
-| train n | braid ext R2 | `tf-rope` ext R2 | ratio |
-|---|---|---|---|
-| 1,500 | -0.335 | -0.085 | *both below chance* |
-| 5,000 | 0.113 | 0.069 | 1.63 |
-| 15,000 | 0.236 | 0.145 | 1.62 |
-| 45,000 | **0.282** | 0.144 | **1.95** |
+| train n | braid ext R2 | `tf-rope` ext R2 | difference | ratio |
+|---|---|---|---|---|
+| 1,500 | -0.258 +/- 0.081 | -0.088 +/- 0.020 | **-0.170** | *both below chance* |
+| 5,000 | 0.115 +/- 0.003 | 0.063 +/- 0.007 | 0.052 +/- 0.008 | 1.82 |
+| 15,000 | 0.243 +/- 0.007 | 0.139 +/- 0.013 | 0.104 +/- 0.014 | 1.75 |
+| 45,000 | **0.276 +/- 0.006** | 0.148 +/- 0.006 | **0.128 +/- 0.010** | 1.86 |
 
-**The gap does not close with data; it widens.** Over a 30x range the
-transformer's extrapolation plateaus at ~0.145 while the braid layer keeps
-improving, and the ratio goes 1.63 -> 1.62 -> 1.95. Note also the bottom row:
-at 1,500 braids **both models are below chance**, so the prior is not winning a
-small-data corner either. That is the opposite of the failure mode the
-objection describes.
+**Scale does not eat the prior.** Across a 9x data range the ratio is flat at
+~1.8 and the difference grows monotonically, 0.052 -> 0.104 -> 0.128. Nothing
+here is trending toward parity.
 
-**Parameters, at fixed data (15,000 braids).** Matching is only honest at the
-top of this range -- the transformer width search steps by 8 and its embedding
-table dominates at small widths -- so each row carries its actual counts and
-the direction of the mismatch:
+**At 1,500 braids the prior actively HURTS** -- the braid layer is 0.170 *below*
+the transformer, both of them under chance. So this is not a small-data crutch;
+in the regime where such a crutch is supposed to pay, it costs.
+
+Two claims from the single-seed version of this table are **withdrawn**, and
+they are worth naming because both were noise that happened to flatter the
+architecture. The ratio does *not* jump to 1.95 at 45,000 -- that reading came
+from a transformer denominator of 0.144 against 0.145 one row up, a difference
+of a thousandth against a seed spread of +/- 0.013, and with three seeds the
+ratio column is flat instead. And the difference does *not* grow linearly in
+log-data: the single-seed increments were +0.047 and +0.047, which looked like a
+law, and the replicated increments are **+0.053 and +0.023**. The gap widens
+with data and the widening decelerates.
+
+**Parameters, at fixed data.** Matching is only honest at the top of this range
+-- the transformer width search steps by 8 and its embedding table dominates at
+small widths -- so each row carries its actual counts and the direction of the
+mismatch. Seed 0 only:
 
 | d | braid par | tf par | braid ext | tf ext | ratio | matched? |
 |---|---|---|---|---|---|---|
 | 8 | 1,062 | 1,925 | 0.094 | 0.066 | 1.42 | tf has **1.81x** more |
-| 16 | 3,654 | 1,925 | 0.190 | 0.066 | 2.87 | tf has **0.53x** -- *unfair to tf* |
+| 16 | 3,654 | 1,925 | 0.190 | 0.066 | 2.87 | tf has **0.53x** -- *not a comparison* |
 | 32 | 13,446 | 14,965 | 0.236 | 0.145 | 1.62 | 1.11x |
 | 32 | 13,446 | 14,965 | 0.223 | 0.135 | 1.65 | 1.11x, 3000 steps |
 | 64 | 51,462 | 57,565 | 0.221 | 0.160 | **1.38** | 1.12x, 3000 steps |
 
 The `d = 16` row is not a comparison and is shown only for completeness. The
-last two rows are the honest ones: matched to ~12% and to each other at an
-equal step budget, since `d = 64` at 6000 steps does not fit the compute here.
+last two rows are matched to ~12% and to each other at an equal step budget.
+**On this axis the gap narrows, 1.65 to 1.38 for a 4x parameter increase**, with
+the braid layer flat (0.223 -> 0.221) while the transformer gains.
 
-**On this axis the gap does narrow, 1.65 to 1.38 for a 4x parameter increase.**
-Between those two points the braid layer is flat (0.223 -> 0.221) while the
-transformer gains (0.135 -> 0.160). The braid layer has saturated what 15,000
-braids can teach it -- which the data axis says is a data limit, not a ceiling,
-since it was still climbing at 45,000 -- while the transformer still had room.
-So the narrowing is real and is reported as real; whether it continues, or is
-an artefact of holding data fixed while raising capacity, this sweep cannot
-say.
+That narrowing has two possible causes -- capacity outrunning the prior, or the
+braid layer having exhausted what 15,000 braids can teach it -- and one joint
+cell separates them, because sweeping one axis at a time leaves the ambiguity in
+exactly one corner. Run `d = 64` at 45,000 braids:
 
-**The summary the evidence supports:** the prior is *not* a small-data crutch,
-and more data widens rather than closes the gap. More parameters at fixed data
-close some of it. The headline claim stands at the budget it is stated for, and
-extrapolating it to much larger models is not something these numbers license.
+| `d = 64`, 3000 steps | braid ext | tf ext | difference | ratio |
+|---|---|---|---|---|
+| 15,000 braids | 0.221 | 0.160 | 0.061 | 1.38 |
+| **45,000 braids** | **0.298** | 0.163 | **0.135** | **1.83** |
+
+**The narrowing reverses.** Given more data the wide braid layer climbs off
+0.221 to 0.298 -- its best extrapolation score anywhere in this repo -- while
+the transformer stays put at 0.160 -> 0.163. So `d = 64` was data-starved, not
+saturated, and the parameter axis was measuring a data limit that the width
+sweep held fixed by construction. Capacity helps *if* there is data to spend it
+on: 0.298 at `d = 64` against 0.276 at `d = 32`, both at 45,000.
+
+**The summary the evidence supports:** the prior is not a small-data crutch and
+is not eaten by scale on either axis. The ratio holds near 1.8 across a 9x data
+range and recovers to 1.83 at 4x the parameters. The advantage grows with data,
+decelerating; the parameter axis narrows only where data is the binding
+constraint. What these numbers do *not* license is extrapolation to much larger
+models -- the widest point here is 51k parameters, and the joint cell is one
+seed.
 
 ## Train on 3 strands, run on 5
 

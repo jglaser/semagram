@@ -41,7 +41,7 @@ import task_knot as K
 
 BASE = dict(
     models=["braid-ybe", "tf-rope"], test_n=2000, lmin=4, lmax=10, heads=4,
-    batch=128, lr=2e-3, w_ybe=10.0, seed=0, conj_n=0, w_inv=0.0, w_conj=0.0,
+    batch=128, lr=2e-3, w_ybe=10.0, conj_n=0, w_inv=0.0, w_conj=0.0,
     rope_base=8.0, tie_r=True, pure=False,
 )
 
@@ -49,8 +49,8 @@ EXTRA = "EXTRAPOLATION (len 12-16)"
 TEST = "test (same lengths)"
 
 
-def one(train_n, d, steps):
-    a = SimpleNamespace(**BASE, train_n=train_n, d=d, steps=steps)
+def one(train_n, d, steps, seed=0):
+    a = SimpleNamespace(**BASE, train_n=train_n, d=d, steps=steps, seed=seed)
     t0 = time.time()
     r = K.run(a)
     out = {}
@@ -88,14 +88,14 @@ def run(a):
         rows = []
         for n in a.data_sizes:
             print(f"\n########## DATA {n} ##########", flush=True)
-            rows.append((n, one(n, a.d, a.steps)))
+            rows.append((n, one(n, a.d, a.steps, a.seed)))
             log[f"data{n}"] = rows[-1][1]
             table("SCALING IN DATA (width fixed)", "train n", rows)
     if a.axis in ("params", "both"):
         rows = []
         for d in a.widths:
             print(f"\n########## WIDTH {d} ##########", flush=True)
-            rows.append((d, one(a.train_n, d, a.steps)))
+            rows.append((d, one(a.train_n, d, a.steps, a.seed)))
             log[f"d{d}"] = rows[-1][1]
             table("SCALING IN PARAMETERS (data fixed)", "d", rows)
     with open(a.out, "w") as f:
@@ -112,5 +112,6 @@ if __name__ == "__main__":
     ap.add_argument("--train-n", type=int, default=15000)
     ap.add_argument("--d", type=int, default=32)
     ap.add_argument("--steps", type=int, default=6000)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="logs/scaling.json")
     run(ap.parse_args())
