@@ -707,6 +707,65 @@ Hessian and therefore symmetric for any `W_q`, `W_k`. The two statements answer
 different questions and do not conflict. Part I's ablation is the empirical half
 of it: tying costs `+0.496` nats.
 
+## Result 6: the energy framing forbids a directed convolution -- and it is cheap
+
+The sharpest argument against conservativity is two lines and it is correct. A
+quadratic form only ever sees the symmetric part of its operator,
+
+```
+S = 0.5 x^T A x   =>   grad S = 0.5 (A + A^T) x
+```
+
+and for a real circulant `A` the transpose conjugates the symbol, so the
+symmetrised multiplier is `Re g(m)`: real symbol, even kernel,
+reflection-symmetric. Verified in this code path -- `‖grad S - circ(Re g) x‖`
+is **2e-16** relative, and for a generic kernel the odd part the gradient throws
+away is **65%** of its norm. **A scalar action cannot produce a directed
+convolution.** Commitment 1's `O(n log n)` prior is permanently even: a free
+model can learn "look three to the left" and this one structurally cannot.
+
+Two questions follow, and they have different answers.
+
+**Does that make the layer undirected? No.** Direction does not enter Semagram
+through the convolution; it enters through the connection, and that survives
+inside a scalar action. The gauge rotates `q` and `k` by the cumulative edge
+phase, and per 2-plane
+
+```
+W^T R(dth) W = cos(dth) * (W^T W)  +  sin(dth) * (W^T J W)
+```
+
+whose second term is antisymmetric, nonzero, and **odd in dth**. No
+symmetrisation removes it, because the gradient of a log-sum-exp is a softmax
+and not the symmetric part of anything -- the attention term is not a quadratic
+form. Part I's ablation is the evidence: dropping the flat base costs +0.466
+nats and sends the reflection residual to 1.6e-04 (provably blind), while
+keeping it leaves the model directed at 3.3e-02 *and* exactly a gradient field.
+
+**Is the prohibition expensive? Measured: no.** `odd_apply` adds the forbidden
+antisymmetric circulant -- purely imaginary symbol, DC and Nyquist zeroed --
+straight to the update field, bypassing `jax.grad`, so the layer deliberately
+stops being a gradient field. `mnist`, three seeds, +832 params on 31906.
+
+| model | NLL | seed-matched delta |
+|---|---|---|
+| `sema-so2` (conservative) | 3.3970 +/- 0.0131 | -- |
+| `sema-odd` (+ directed convolution) | 3.3953 +/- 0.0130 | **-0.002, -0.001, -0.002** |
+
+The effect is `-0.0017` nats against a seed spread of `0.0131` -- the noise is
+**7.9x** the signal. And the model was not prevented from using the term: `g_odd`
+is initialised at zero and grows on its own to `‖g_odd‖_rms ~ 0.028` against
+`‖g_even‖_rms ~ 1.66`, i.e. it takes about **1.7%** as much directed kernel as
+even kernel, spread evenly over modes 1-12, and gets 0.002 nats for it.
+
+So conservativity forbids exactly what the argument says it forbids, the model
+would use a little more if allowed, and it is worth nothing here. The honest
+scope: this is one task, on data where orientation matters less than it does in
+language. But Part I's evidence points the same way even on text -- direction
+there is worth +0.466 nats and it comes from the flat connection, not from the
+convolution. On the evidence available, the even-kernel constraint is not where
+this architecture is losing.
+
 ## What was tried and did not work
 
 Same convention as Part I: each was a plausible mechanism, measured, and either
@@ -724,6 +783,7 @@ dropped or replaced.
 | a proper solver (CCCP / L-BFGS / Newton-CG) fixes the forward pass | it converges (`‖∇S‖` 137 -> 0.003) and the minimiser is 0.33 nats WORSE than the 8-sweep unroll |
 | the concave-convex splitting CCCP needs | the attention term has 98.4% positive eigenvalues in `x`; concave only for FIXED keys |
 | negative curvature is what stops the solve converging (my own Result 4 claim) | refuted -- the Hessian at the minimum is PD, +5.69 to +2304 |
+| the even-kernel prohibition is what the layer needs most | a scalar action provably cannot express a directed convolution (verified 2e-16), and handing it one anyway is worth -0.002 nats against a 0.013 seed spread |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
