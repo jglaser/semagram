@@ -17,7 +17,6 @@ results*.json
 ablation.json
 input.txt
 *.svg
-!docs/*.svg
 
 # delivery artefacts (the patch bundle handed to the user)
 *.patch
