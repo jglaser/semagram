@@ -93,6 +93,9 @@ class LoopCfg:
     norm_eps: float = 1e-6
     w_holo: float = 0.2
     vocab: int = 32
+    w_stat: float = 0.0       # penalise ||grad_x S|| at the unroll's output, so
+                              # that what the network computes is forced to be
+                              # what the energy wants. See loss_fn.
     odd_conv: bool = False    # add the antisymmetric circulant that a scalar
                               # action provably CANNOT produce. Breaks
                               # conservativity on purpose. See odd_apply.
@@ -485,13 +488,44 @@ def logits_of(p, x, cfg):
 
 
 def loss_fn(p, tokens, clamp, cfg):
-    x = solve(p, p["emb"][tokens], clamp, cfg)
+    """Task loss, loop-closure penalty, and optionally a STATIONARITY penalty.
+
+    The stationarity term is the whole point of `w_stat` and it comes straight
+    out of the diagnostic in Result 5. That diagnostic measures a variational
+    gap -- the task score at `argmin S` minus the task score at the unroll's
+    output -- and on the model as trained it is +0.329 nats, with
+    `||grad_x S||` sitting at 137 where the true minimum has 0.003. In other
+    words the network's answer is nowhere near stationary, so calling the
+    forward pass a variational solve is decoration.
+
+    A measured gap can be optimised against. Adding
+
+        w_stat * mean_free( (grad_x S)^2 )
+
+    to the training loss pushes the unroll's output toward being an actual
+    stationary point. Note what has freedom to move here: not just the state,
+    but the PARAMETERS, hence the energy itself. The question this asks is not
+    "can the solver reach the minimum" -- L-BFGS already can -- but "does this
+    energy family admit a parameterisation whose minimum is also good at the
+    task". If it does, everything Result 4 could not deliver becomes available,
+    because the certificate would then certify something true. If it does not,
+    the form of the energy is wrong rather than the solver.
+
+    Cheap in principle and second-order in practice: the loss now contains a
+    gradient, so backprop differentiates through it.
+    """
+    c = p["emb"][tokens]
+    x = solve(p, c, clamp, cfg)
     ce = optax.softmax_cross_entropy_with_integer_labels(
         logits_of(p, x, cfg), tokens)
     free = 1.0 - clamp
     nll = jnp.sum(ce * free) / (jnp.sum(free) + 1e-6)
     resid, _ = holonomy(p, x, cfg)
-    return nll + cfg.w_holo * resid, (nll, resid)
+    loss = nll + cfg.w_holo * resid
+    if cfg.w_stat > 0:
+        g = jax.grad(action, argnums=1)(p, x, c, clamp, cfg) * free[..., None]
+        loss = loss + cfg.w_stat * jnp.sum(g ** 2) / (jnp.sum(free) * cfg.d + 1e-6)
+    return loss, (nll, resid)
 
 
 # ----------------------------------------------------------------------------
