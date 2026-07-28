@@ -87,9 +87,38 @@ def forward(p, toks, mask, s, d, strand_mask):
     return jax.nn.gelu(h @ p["out1"] + p["bo1"]) @ p["out2"] + p["bo2"]
 
 
-def dataset(n, s, len_range, seed, s_max, l_max):
-    W, Y, _, _ = B.build(n, s_range=(s, s), len_range=len_range, seed=seed,
-                         cache=False)
+def n_components(w, s):
+    """Cycles of the induced permutation = components of the closure."""
+    p = B.perm_of(w, s)
+    seen, c = set(), 0
+    for i in range(s):
+        if i in seen:
+            continue
+        c += 1
+        j = i
+        while j not in seen:
+            seen.add(j)
+            j = p[j]
+    return c
+
+
+def dataset(n, s, len_range, seed, s_max, l_max, knots_only=False):
+    """`knots_only` keeps single-component closures.
+
+    Without it this benchmark is confounded and the confound is mine. The
+    closure of an s-strand braid has as many components as the permutation has
+    cycles, so raising the strand count changes WHAT THE TARGET IS: measured,
+    1.88 components at 3 strands against 2.77 at 5, with the Jones values 3.15x
+    more spread under 3-strand normalisation. An R2 drop across that boundary
+    conflates "the model cannot generalise" with "the target distribution
+    moved", and the first run could not tell them apart.
+    """
+    W, Y, _, _ = B.build(n * (6 if knots_only else 1), s_range=(s, s),
+                         len_range=len_range, seed=seed, cache=False)
+    if knots_only:
+        keep = [k for k, w in enumerate(W) if n_components(w, s) == 1][:n]
+        W = [W[k] for k in keep]
+        Y = Y[keep]
     X, M = B.encode(W, s_max, l_max)
     sm = np.zeros((len(W), s_max), np.float32)
     sm[:, :s] = 1.0
@@ -100,13 +129,20 @@ def run(a):
     s_max, l_max = 5, a.lmax
     vocab = B.VOCAB(s_max)
     Xtr, Mtr, Ytr, Str = dataset(a.train_n, a.train_s, (4, a.lmax), 1,
-                                 s_max, l_max)
+                                 s_max, l_max, a.knots_only)
     mu, sd = Ytr.mean(0), Ytr.std(0) + 1e-8
     Ytr_ = jnp.asarray((Ytr - mu) / sd)
     packs = {}
     for s in a.test_s:
-        X, M, Y, S = dataset(a.test_n, s, (4, a.lmax), 2 + s, s_max, l_max)
-        packs[s] = (X, M, jnp.asarray((Y - mu) / sd), S)
+        X, M, Y, S = dataset(a.test_n, s, (4, a.lmax), 2 + s, s_max, l_max,
+                             a.knots_only)
+        # BOTH scorings. `own` divides by this strand count's own variance, so
+        # it answers "how much of the variance HERE does the model explain" and
+        # is unaffected by the distribution shift. `train` divides by the
+        # 3-strand baseline and conflates the two.
+        packs[s] = (X, M, jnp.asarray((Y - mu) / sd), S,
+                    jnp.asarray((Y - Y.mean(0)) / (Y.std(0) + 1e-8)),
+                    jnp.asarray((Y.mean(0) - mu) / sd))
     print(f"train on {a.train_s} strands ({Xtr.shape[0]} words), "
           f"test on {a.test_s}\n", flush=True)
 
@@ -139,9 +175,13 @@ def run(a):
           if it % max(a.steps // 4, 1) == 0:
               print(f"  {'tied  ' if tie else 'untied'} {it:5d}/{a.steps} "
                     f"loss {float(l):.4f} | {time.time()-t0:4.0f}s", flush=True)
-      results[tie] = ({s: float(1 - jnp.mean((fwd(p, X, M, S) - Y) ** 2)
-                                / jnp.mean(Y ** 2))
-                       for s, (X, M, Y, S) in packs.items()},
+      def _r2(X, M, Y, S, Yown, off):
+          pred = fwd(p, X, M, S)
+          r_tr = float(1 - jnp.mean((pred - Y) ** 2) / jnp.mean(Y ** 2))
+          po = (pred - off) * 1.0
+          r_own = float(1 - jnp.mean((po - Yown) ** 2) / jnp.mean(Yown ** 2))
+          return r_tr, r_own
+      results[tie] = ({s: _r2(*v) for s, v in packs.items()},
                       float(K.ybe_residual(p, a.d)),
                       sum(v.size for v in jax.tree.leaves(p)))
 
@@ -150,12 +190,13 @@ def run(a):
     print("=" * 72)
     hdr = f"{'model':8s} {'params':>8s} {'YBE':>9s}"
     for s in packs:
-        hdr += f" | {str(s)+' strands':>12s}"
-    print(hdr)
+        hdr += f" | {str(s)+'-strand R2':>20s}"
+    print(hdr + "\n" + " " * 28 + ("| " + f"{'vs train':>9s} {'vs own':>9s} ")
+          * len(packs))
     for tie, (r2s, yb, npar) in results.items():
         line = f"{'tied' if tie else 'untied':8s} {npar:8d} {yb:9.1e}"
         for s in packs:
-            line += f" | {r2s[s]:12.3f}"
+            line += f" | {r2s[s][0]:9.3f} {r2s[s][1]:9.3f} "
         print(line)
     print(f"\n{'':8s} {'':8s} {'':9s}" + "".join(
         f" | {'in dist' if s == a.train_s else 'NEVER SEEN':>12s}" for s in packs))
@@ -177,6 +218,9 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-ybe", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--knots-only", action="store_true", default=True,
+                    help="single-component closures only, so raising the "
+                         "strand count does not change what the target is")
     ap.add_argument("--control", action="store_true", default=True,
                     help="also train an UNTIED model, whose R rows for unseen "
                          "generators never get a gradient")
