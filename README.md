@@ -18,6 +18,8 @@ python task_knot.py --models braid-ybe --w-ybe 10  # the best setting
 
 CPU only, no GPU used anywhere.
 
+![Braid words and their closures](docs/fig1_braids.svg)
+
 ## The question, and why this is the right test of it
 
 Building a symmetry into an architecture is supposed to beat learning it from
@@ -75,6 +77,8 @@ fair comparisons.
 | **`braid-ybe`, tied R** | 29.4k | **0.760 +/- 0.005** | **0.269 +/- 0.015** |
 | **`braid-ybe`, tied R** | **13.4k** | 0.730 | **0.267** |
 
+![In-distribution versus extrapolation](docs/fig3_extrapolation.svg)
+
 Two things to read off this before anything else.
 
 **The architecture on its own loses.** `braid` without the penalty scores 0.128
@@ -126,6 +130,8 @@ Part generic prior, part genuine invariance -- and tying converts the rest.
 
 **The chain closes end to end:**
 
+![Invariance versus extrapolation](docs/fig4_mechanism.svg)
+
 | | R-III ratio | extrapolation R2 |
 |---|---|---|
 | `braid`, no penalty | 0.912 | 0.128 |
@@ -151,6 +157,8 @@ three seeds at the endpoints):
 | **10** | 3.35e-03 | **0.700** | **0.225** |
 | 30 | 1.15e-03 | 0.682 | 0.208 |
 | 100 | 2.90e-04 | 0.664 | 0.190 |
+
+![Yang-Baxter dose-response](docs/fig2_doseresponse.svg)
 
 Monotone up to `w = 10` across a 35x range of residual, then it turns over.
 Three seeds at the endpoints confirm it: `w = 10` gives 0.224 +/- 0.003 against
@@ -264,6 +272,7 @@ makes it a degenerate regression target.
 | `braids.py` | braid words, knot closures, exact Jones polynomials (two ways) |
 | `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baselines |
 | `rIII_probe.py` | measures Reidemeister-III invariance directly, independent of the task |
+| `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
 | `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |
 | `contours.py`, `task_shape.py`, `task_cont.py` | the earlier closed-contour benchmark |
