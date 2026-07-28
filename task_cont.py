@@ -101,6 +101,27 @@ def build(source="mnist", n=48, split="train", cache=True):
     return D, LG
 
 
+def bin_nll(mu, sd, tok, edges):
+    """Score a continuous model in the OLD units.
+
+    The Part II numbers are discrete NLL over 32 equal-frequency turning-angle
+    bins; a Gaussian density in radians is not comparable to that. The honest
+    conversion is to push the predicted density through the SAME quantiser --
+    integrate it over each bin interval -- and score the resulting categorical
+    against the same label. That is exact, and it is the only way these two
+    families cross-compare.
+
+    It is not a free win for the continuous model: it still has to place its
+    mass in the right bin, and a Gaussian fits the heavy tails at corners badly.
+    """
+    from jax.scipy.stats import norm
+    e = jnp.concatenate([jnp.array([-1e3]), jnp.asarray(edges),
+                         jnp.array([1e3])])
+    z = (e[None, None, :] - mu[..., None]) / sd[..., None]
+    p = jnp.clip(jnp.diff(norm.cdf(z), axis=-1), 1e-12, 1.0)
+    return -jnp.log(jnp.take_along_axis(p, tok[..., None], -1)[..., 0])
+
+
 def feats(d, logl):
     """Inputs the model sees: (cos d, sin d, log L). Angle enters as a point on
     the circle so that wrap-around is not a discontinuity in the input."""
@@ -209,8 +230,19 @@ def closure_energy_cont(p, cfg, d, logl, clamp, w, lock_angle=False):
 # ----------------------------------------------------------------------------
 
 def run(a):
-    dtr, ltr = build(a.dataset, a.n, "train")
-    dte, lte = build(a.dataset, a.n, "test")
+    tokd = C.cached(a.dataset, a.n, 32)          # for scoring in the old units
+    if a.repr == "arc":
+        # Identical data to the tokenised benchmark -- the SAME equal-arc-length
+        # turning angles, pre-quantisation -- with length held constant. Only
+        # the head differs, so this isolates the TYPE change from the CHANNEL.
+        dtr = np.asarray(tokd["train_raw"]); dte0 = np.asarray(tokd["test_raw"])
+        ltr = np.zeros_like(dtr); lte0 = np.zeros_like(dte0)
+        dte, lte = dte0, lte0
+    else:
+        dtr, ltr = build(a.dataset, a.n, "train")
+        dte, lte = build(a.dataset, a.n, "test")
+    te_tok = jnp.asarray(np.digitize(dte[:a.eval_n], tokd["edges"]))
+    edges = tokd["edges"]
     dte, lte = jnp.asarray(dte[:a.eval_n]), jnp.asarray(lte[:a.eval_n])
     dtr, ltr = jnp.asarray(dtr), jnp.asarray(ltr)
     mask = T.eval_masks(dte.shape[0], a.n, a.gap)
@@ -250,7 +282,14 @@ def run(a):
     base = float(jnp.mean(closure_cont(dd, ll)))
     free = 1.0 - mask
     nll0 = float(jnp.sum(cont_nll(p, x, cfg, dte, lte) * free) / jnp.sum(free))
+    mu, ls, _, _ = head(p, x, cfg)
+    bn = bin_nll(mu, jnp.exp(ls), te_tok, edges)
+    bnll = float(jnp.sum(bn * free) / jnp.sum(free))
     print(f"\nunconstrained: cont-NLL {nll0:.4f}  closure {base:.4f}")
+    print(f"SAME UNITS AS PART II (density integrated over the 32 quantile "
+          f"bins): {bnll:.4f}")
+    print(f"  references: unigram 3.466 | Markov two-sided infill 3.445 | "
+          f"sema-so2 3.397 | tf-abs 3.167")
     print(f"\n{'w':>8s} {'cont-NLL':>10s} {'closure':>9s}   {'closure (angles locked)':>24s}")
     for w in a.con_w:
         out = []
@@ -278,6 +317,11 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--eval-n", type=int, default=512)
     ap.add_argument("--w-stat", type=float, default=0.0)
+    ap.add_argument("--repr", default="param", choices=["param", "arc"],
+                    help="param: uniform-parameter, angle+length (adds the "
+                         "stroke channel). arc: equal arc length, angle only "
+                         "-- identical data to the tokenised benchmark, so it "
+                         "isolates the continuous-head change.")
     ap.add_argument("--con-w", type=float, nargs="*",
                     default=[0.3, 1, 3, 10, 30, 100])
     run(ap.parse_args())
