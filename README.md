@@ -2,9 +2,10 @@
 
 A sequence layer whose forward pass **is** a braid representation, and a
 benchmark where that pays off: predicting the Jones polynomial of a braid
-closure from its word. Against a parameter-matched transformer it generalises
-**3.4x better** past its training range, and the advantage tracks how closely
-the learned maps satisfy the Yang-Baxter equation.
+closure from its word. At **one third** the parameters of a tuned transformer
+baseline it generalises **1.54x better** past its training range -- and the gain
+is traceable, link by link, to how nearly the learned maps satisfy the braid
+relation.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
@@ -16,6 +17,8 @@ python task_knot.py --models braid-ybe --w-ybe 10  # the best setting
 ```
 
 CPU only, no GPU used anywhere.
+
+![Braid words and their closures](docs/fig1_braids.svg)
 
 ## The question, and why this is the right test of it
 
@@ -61,25 +64,89 @@ turns out to matter.
 
 ## Results
 
-Three seeds, parameter-matched, trained on braid words of length 4-10 and tested
-on 12-16.
+Trained on braid words of length 4-10, tested on 12-16. Transformer baselines
+use **rotary** positions with the base tuned to the sequence length; see
+"Getting the baseline right" below for why the obvious alternatives are not
+fair comparisons.
 
-| model | params | YBE residual | test R2 | extrapolation R2 |
-|---|---|---|---|---|
-| `braid` | 34.2k | 1.15e-01 | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
-| **`braid-ybe`** | 34.2k | **1.66e-02** | **0.681 +/- 0.005** | **0.186 +/- 0.012** |
-| `tf` (transformer) | 32.8k | -- | 0.643 +/- 0.008 | 0.055 +/- 0.028 |
+| model | params | test R2 | extrapolation R2 |
+|---|---|---|---|
+| `tf-rope` (baseline) | 40.3k | 0.537 +/- 0.010 | 0.174 +/- 0.011 |
+| `braid`, no penalty | 34.2k | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
+| `braid-ybe`, untied R | 34.2k | 0.681 +/- 0.005 | 0.186 +/- 0.012 |
+| **`braid-ybe`, tied R** | 29.4k | **0.760 +/- 0.005** | **0.269 +/- 0.015** |
+| **`braid-ybe`, tied R** | **13.4k** | 0.730 | **0.267** |
 
-Seed-matched extrapolation deltas against the transformer are +0.170, +0.148,
-+0.076: positive on every seed, mean **+0.131**, a 3.4x ratio.
+![In-distribution versus extrapolation](docs/fig3_extrapolation.svg)
 
-**The advantage splits in two and both halves are measured.** `tf` -> `braid` is
-+0.073, the architecture matching the generative process. `braid` ->
-`braid-ybe` is +0.058, the symmetry itself -- those two are the same network and
-differ only by the penalty. So about 44% of the gain is Reidemeister invariance
-specifically.
+Two things to read off this before anything else.
 
-**It is causal, by dose-response.** Varying only `w_ybe`, seed 0:
+**The architecture on its own loses.** `braid` without the penalty scores 0.128
+against the baseline's 0.174. A strand-structured state and a scan over letters
+buy nothing by themselves. Everything below is about the penalty.
+
+**Tying R is what makes the penalty mean anything.** With one map per sign
+applied at every position -- which is what a braid representation is -- the
+model reaches 0.269, and the `d = 32` version does the same at **13.4k
+parameters against the baseline's 40.3k**. The two widths agree to 0.002, so
+this is tying rather than capacity.
+
+## The mechanism, measured at every link
+
+The obvious worry about any penalty like this is that it is a generic
+regulariser wearing a topology costume: push a matrix toward a measure-zero
+variety and things often improve for reasons having nothing to do with the
+variety. `rIII_probe.py` settles it without retraining anything for the task.
+
+Generate word pairs differing by a real Reidemeister III move --
+`sigma_i sigma_{i+1} sigma_i` against `sigma_{i+1} sigma_i sigma_{i+1}`, the
+same braid -- and measure how far apart the model's outputs are. Control pairs
+use the same three letters in a non-braid order, so they are a *different*
+braid; without them a model that had collapsed toward a constant would look
+perfectly invariant. The ratio is the measurement.
+
+| model | `w_ybe` | YBE residual | R-III ratio |
+|---|---|---|---|
+| untied | 0 | 6.54e-02 | 0.912 |
+| untied | 1 | 2.03e-02 | 0.834 |
+| untied | 10 | 3.68e-03 | 0.723 |
+| untied | 100 | 4.23e-04 | 0.626 |
+| tied | 0 | 5.94e-02 | 0.795 |
+| tied | 1 | 1.73e-02 | 0.652 |
+| tied | 10 | 3.74e-03 | 0.543 |
+| **tied** | **100** | 4.79e-04 | **0.468** |
+
+At matched residual the tied model is always more invariant -- 0.834 against
+0.652 at ~2e-02, 0.723 against 0.543 at ~3.7e-03 -- and it starts lower with no
+penalty at all. So tying is the correct formulation, exactly as the algebra
+says: untied, `R[sigma_i]` and `R[sigma_{i+1}]` are different matrices never
+applied at the same strand pair, and two matrices that each satisfy Yang-Baxter
+to 1.3e-15 have a **cross braid-relation residual of 11.15**.
+
+What the algebra did *not* predict is that the untied penalty gains invariance
+anyway, 0.912 to 0.626. Constraining each map onto the variety evidently makes
+different solutions behave alike enough that the relation approximately holds.
+Part generic prior, part genuine invariance -- and tying converts the rest.
+
+**The chain closes end to end:**
+
+![Invariance versus extrapolation](docs/fig4_mechanism.svg)
+
+| | R-III ratio | extrapolation R2 |
+|---|---|---|
+| `braid`, no penalty | 0.912 | 0.128 |
+| untied, `w = 10` | 0.723 | 0.186 |
+| tied, `w = 10` | 0.543 | **0.267** |
+
+`corr(R-III ratio, extrapolation R2) = -0.994`, with invariance measured on
+synthetic word pairs that never appear in training and have nothing to do with
+the Jones polynomial. Enforcement raises invariance; invariance raises
+extrapolation.
+
+## The dose-response, and where it turns over
+
+Varying only the penalty weight on the untied model (seed 0 for the sweep,
+three seeds at the endpoints):
 
 | `w_ybe` | YBE residual | test R2 | extrapolation R2 |
 |---|---|---|---|
@@ -91,26 +158,46 @@ specifically.
 | 30 | 1.15e-03 | 0.682 | 0.208 |
 | 100 | 2.90e-04 | 0.664 | 0.190 |
 
-Up to `w = 10` this is monotone across a 35x range of residual,
-`corr(log residual, extrapolation R2) = -0.987`, with nothing else varying. At
-the peak it is **7.8x** the transformer.
+![Yang-Baxter dose-response](docs/fig2_doseresponse.svg)
 
-**Then it turns over, which is the more interesting half.**
+Monotone up to `w = 10` across a 35x range of residual, then it turns over.
+Three seeds at the endpoints confirm it: `w = 10` gives 0.224 +/- 0.003 against
+`w = 100` at 0.180 +/- 0.010, seed-matched +0.035, +0.054, +0.045.
 
-```
-soft (0.225)  >  exact (0.190)  >  none (0.141)  >>  transformer (0.029)
-```
+So **approximate invariance beats exact invariance** on the untied model, even
+though the probe shows `w = 100` is the *more* invariant setting (ratio 0.626
+against 0.723). Yang-Baxter solutions are a measure-zero variety; past a point,
+buying more invariance costs more capacity than it returns.
 
-Every level of the symmetry beats having none and all of them beat the
-transformer, but **approximate invariance beats exact invariance**. Yang-Baxter
-solutions are a measure-zero variety; forcing the learned maps exactly onto it
-removes capacity the model needs for fitting.
-
-And that is the sentence the whole project has been circling. The earlier layer
-imposed its symmetries *exactly* and they were worth nothing. Exactness was
+That is the sentence the whole project has been circling. The earlier layer in
+[`lessons.md`](lessons.md) imposed its symmetries *exactly* -- shift
+equivariance measured at 1.3e-15 -- and they were worth nothing. Exactness was
 never the axis. A symmetry has to be **hard enough to be worth having** --
 Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
 behind**.
+
+## Getting the baseline right
+
+Two baselines had to be discarded first, and both flattered the layer.
+
+**Learned absolute positions are broken at exactly the lengths tested.**
+Training words are length 4-10 and extrapolation words 12-16, while `pos` has 16
+rows; padded positions are masked out of attention and out of the pool, so rows
+`pos[10:16]` receive **exactly zero gradient**. Measured: `1.334e+01` at row 0,
+`0.000e+00` at rows 10 through 15. At extrapolation that model reads 37.5% of
+its positional signal off random init. An earlier version of this README
+reported a 3.4x advantage against it and explained the gap as the transformer
+"fitting length-specific features that mislead". That was wrong.
+
+**Removing positions entirely is not the fix either.** `tf-nope` scores 0.417
+in distribution against 0.643, because a braid word is order-dependent. Dropping
+information is not the same as removing a confound.
+
+**Rotary positions with a tuned base are the fair comparison.** The logit
+depends on `i - j`, so unseen absolute indices never arise. But the usual base
+of 10000 is tuned for contexts of thousands and over 16 tokens gives total
+rotations of 15, 1.5, 0.15, 0.02 radians -- three of four bands nearly static.
+Base 8 gives 15, 8.9, 5.3, 3.2, and lifts the baseline from 0.145 to 0.174.
 
 ## Does it work away from knots?
 
@@ -183,7 +270,9 @@ makes it a degenerate regression target.
 | file | what it is |
 |---|---|
 | `braids.py` | braid words, knot closures, exact Jones polynomials (two ways) |
-| `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baseline |
+| `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baselines |
+| `rIII_probe.py` | measures Reidemeister-III invariance directly, independent of the task |
+| `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
 | `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |
 | `contours.py`, `task_shape.py`, `task_cont.py` | the earlier closed-contour benchmark |

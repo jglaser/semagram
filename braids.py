@@ -297,13 +297,33 @@ def random_braid(rng, s, length):
 POINTS = tuple(np.exp(1j * np.array([0.255, 0.888, 1.415])))
 
 
+def perm_of(word, s):
+    """The image of a braid word in the symmetric group."""
+    p = np.arange(s)
+    for (i, _sgn) in word:
+        p[i], p[i + 1] = p[i + 1], p[i]
+    return p
+
+
 def build(n_items, s_range=(3, 4), len_range=(4, 10), points=POINTS,
-          seed=0, max_strands=5, cache=True):
+          seed=0, max_strands=5, cache=True, pure=False):
+    """`pure=True` keeps only words whose permutation is the identity.
+
+    This is the control the permutation benchmark demanded. There, the braided
+    layer scored 1.000 because its state IS the permutation state -- an almost
+    perfect architectural match, with no headroom to separate the symmetry from
+    the architecture. Restricting to PURE braids removes that shortcut entirely:
+    every example has the identity permutation, so strand tracking carries no
+    information and the target can only be read off the crossing structure. The
+    pure braid group is the kernel of B_n -> S_n, and it is where the braiding
+    actually lives.
+    """
     """A dataset of braid words with exact Jones values at fixed evaluation
     points. Evaluating at a few numeric A rather than carrying coefficients
     keeps the target a fixed-size real vector while remaining exact."""
     import os, pickle
-    tag = f"braid_{n_items}_{s_range}_{len_range}_{seed}.pkl".replace(" ", "")
+    tag = (f"braid_{n_items}_{s_range}_{len_range}_{seed}"
+           f"{'_pure' if pure else ''}.pkl").replace(" ", "")
     path = os.path.join("data", tag)
     if cache and os.path.exists(path):
         with open(path, "rb") as f:
@@ -315,6 +335,8 @@ def build(n_items, s_range=(3, 4), len_range=(4, 10), points=POINTS,
         s = int(rng.integers(s_range[0], s_range[1] + 1))
         L = int(rng.integers(len_range[0], len_range[1] + 1))
         w = random_braid(rng, s, L)
+        if pure and not np.array_equal(perm_of(w, s), np.arange(s)):
+            continue
         key = (s, tuple(w))
         if key in seen:
             continue

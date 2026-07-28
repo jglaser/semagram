@@ -8,6 +8,14 @@ the circle -- beat every model that was right about it. The proposed reason:
 cyclic shift is too easy a symmetry to matter. A flexible model learns it more
 cheaply than a rigid one imposes it.
 
+Read `--tie-r` before trusting any Yang-Baxter claim here. Untied, each
+generator index gets its own matrix and no two are ever applied at the same
+strand pair, so `ybe_residual` enforces "each map is independently a constant-R
+YBE solution" rather than the braid relation between generators -- two matrices
+that each satisfy YBE to 1.3e-15 have a cross residual of 11.15. Tying is what
+makes the penalty mean Reidemeister III, and `rIII_probe.py` measures the
+difference directly.
+
 Reidemeister equivalence is the opposite kind of symmetry. Deciding whether two
 braid words close to the same knot has no cheap local statistic; the Jones
 polynomial is #P-hard in general. If ANY symmetry is worth building in, it is
@@ -27,8 +35,12 @@ That gives the exact ablation the question needs:
   `braid-ybe`  the same, plus a penalty forcing the learned map to satisfy the
                Yang-Baxter equation, which is precisely the statement that the
                layer is invariant under Reidemeister III
-  `tf`         a parameter-matched transformer over the same token sequence,
-               which must learn all of this from data
+  `tf-rope`    a parameter-matched transformer over the same token sequence,
+               which must learn all of this from data. Rotary positions with
+               the base tuned to the sequence length: `tf-abs` reads 37.5% of
+               its position encoding off untrained rows at extrapolation
+               length, and `tf-nope` drops 0.23 R2 in distribution because a
+               braid word is order-dependent. Neither is a fair comparison.
 
 EXTRAPOLATION IS THE POINT. All three are trained on short braids and tested on
 longer ones. An exactly-invariant model should degrade gracefully in crossing
@@ -55,13 +67,26 @@ import semagram as S
 # ----------------------------------------------------------------------------
 # the braided layer
 
-def init_braid(key, s_max, d, vocab):
+def init_braid(key, s_max, d, vocab, tie_r=False):
+    """`tie_r` uses ONE map per sign, applied at every generator position.
+
+    This is what a braid representation actually is -- a single R lifted to each
+    adjacent pair -- and it is also what makes `ybe_residual` mean what the
+    README claimed. Untied, `R[sigma_1]` and `R[sigma_2]` are different matrices
+    that are never applied at the same strand pair, so enforcing YBE on each
+    INDEPENDENTLY does not enforce the braid relation BETWEEN them: two matrices
+    that each satisfy YBE to 1.3e-15 have a cross braid-relation residual of
+    11.15. Tying them makes the two lifts genuinely sigma_i sigma_{i+1} sigma_i
+    against sigma_{i+1} sigma_i sigma_{i+1}, i.e. Reidemeister III.
+
+    It also cuts parameters ~3x and makes the layer strand-count agnostic.
+    """
     k = jax.random.split(key, 6)
     sc = 1.0 / np.sqrt(2 * d)
+    nR = 2 if tie_r else vocab
     return {
-        # one 2-strand map per letter type (generator index x sign)
-        "R": jax.random.normal(k[0], (vocab, 2 * d, 2 * d)) * sc,
-        "bR": jnp.zeros((vocab, 2 * d)),
+        "R": jax.random.normal(k[0], (nR, 2 * d, 2 * d)) * sc,
+        "bR": jnp.zeros((nR, 2 * d)),
         "x0": jax.random.normal(k[1], (s_max, d)) * 0.5,
         "out1": jax.random.normal(k[2], (d, 4 * d)) * (1 / np.sqrt(d)),
         "bo1": jnp.zeros((4 * d,)),
@@ -92,8 +117,11 @@ def braid_forward(p, toks, mask, s_max, d):
                                               * jnp.ones((1, 1, d), jnp.int32), 1)],
                          axis=1)[:, :, 0, :]      # (b, 2, d)
         flat = pair.reshape(b, 2 * d)
-        R = p["R"][tok]                           # (b, 2d, 2d)
-        out = jnp.tanh(jnp.einsum("bij,bj->bi", R, flat) + p["bR"][tok])
+        # tied: index by SIGN only, so the same map acts at every position
+        ridx = jnp.where(p["R"].shape[0] == 2, (tok - 1) % 2, tok)
+        ridx = jnp.clip(ridx, 0, p["R"].shape[0] - 1)
+        R = p["R"][ridx]                          # (b, 2d, 2d)
+        out = jnp.tanh(jnp.einsum("bij,bj->bi", R, flat) + p["bR"][ridx])
         out = out.reshape(b, 2, d)
         sel_i = (idx[None, :] == i[:, None])[..., None]
         sel_j = (idx[None, :] == (i + 1)[:, None])[..., None]
@@ -131,11 +159,20 @@ def ybe_residual(p, d):
             jnp.concatenate([Z, R[:d, :d], R[:d, d:]], -1),
             jnp.concatenate([Z, R[d:, :d], R[d:, d:]], -1)], 0)
         return P
-    tot = 0.0
-    for a in range(1, v):
+    tot, cnt = 0.0, 0
+    lo = 0 if v == 2 else 1
+    for a in range(lo, v):
         R1, R2 = lift(p["R"][a], True), lift(p["R"][a], False)
         tot = tot + jnp.mean((R1 @ R2 @ R1 - R2 @ R1 @ R2) ** 2)
-    return tot / max(v - 1, 1)
+        cnt += 1
+        if v == 2:                      # tied: also braid sigma against sigma^-1
+            for b in range(lo, v):
+                if b == a:
+                    continue
+                S1, S2 = lift(p["R"][a], True), lift(p["R"][b], False)
+                tot = tot + jnp.mean((S1 @ S2 @ S1 - S2 @ S1 @ S2) ** 2)
+                cnt += 1
+    return tot / max(cnt, 1)
 
 
 # ----------------------------------------------------------------------------
@@ -155,9 +192,47 @@ def tf_forward(p, toks, mask, heads):
     return h[:, 0] * 0.0 + _pool(p, toks, mask, heads)
 
 
-def _pool(p, toks, mask, heads):
+def _rope(x, n, base=10000.0):
+    """Rotary positions: attention depends on i - j, so unseen absolute
+    positions are not a problem. This is the FAIR baseline.
+
+    NoPE was the first attempt and it is not fair in the other direction: a
+    braid word is order-dependent, so removing position entirely drops the
+    transformer to R2 0.417 in distribution against 0.643 with (broken)
+    absolute positions. Dropping information is not the same as fixing a
+    confound.
+    """
+    dh = x.shape[-1]
+    half = dh // 2
+    if half == 0:
+        return x
+    # `base` must suit the sequence length. The transformer default of 10000 is
+    # tuned for contexts of thousands: over n = 16 it gives total rotations of
+    # 15, 1.5, 0.15 and 0.015 radians, so three of four bands are nearly static
+    # and the encoding runs on one usable frequency. Comparing a braid layer
+    # against that is the same class of unfairness as the untrained
+    # absolute-position rows it replaced.
+    freq = 1.0 / (base ** (np.arange(half) / half))
+    ang = np.arange(n)[:, None] * freq[None, :]
+    c = jnp.asarray(np.cos(ang), x.dtype)[None, None]
+    s = jnp.asarray(np.sin(ang), x.dtype)[None, None]
+    x1, x2, rest = x[..., :half], x[..., half:2 * half], x[..., 2 * half:]
+    return jnp.concatenate([x1 * c - x2 * s, x1 * s + x2 * c, rest], -1)
+
+
+def _pool(p, toks, mask, heads, use_pos=True, rope=False, rope_base=10000.0):
+    """`use_pos=False` is the NoPE baseline, and it is not cosmetic.
+
+    Training words are length 4-10 and extrapolation words 12-16, so rows
+    pos[10:16] are ALWAYS masked out of attention and out of the pool during
+    training and receive exactly zero gradient -- measured. At extrapolation the
+    model then reads 37.5% of its positional signal off random init. Any
+    transformer-versus-braid number using learned absolute positions is
+    confounded by that, and the braid layer is a scan, so length generalisation
+    is nearly free for it.
+    """
     b, n = toks.shape
-    e = p["emb"][toks] + p["pos"][:n]
+    e = p["emb"][toks] + (p["pos"][:n] if use_pos else 0.0)
     h = e
     for blk in p["blocks"]:
         z = S.layernorm(h)
@@ -165,7 +240,10 @@ def _pool(p, toks, mask, heads):
         d = q.shape[-1]
         dh = d // heads
         rs = lambda t: t.reshape(b, n, heads, dh).transpose(0, 2, 1, 3)
-        att = jnp.einsum("bhid,bhjd->bhij", rs(q), rs(k)) / np.sqrt(dh)
+        qh, kh = rs(q), rs(k)
+        if rope:
+            qh, kh = _rope(qh, n, rope_base), _rope(kh, n, rope_base)
+        att = jnp.einsum("bhid,bhjd->bhij", qh, kh) / np.sqrt(dh)
         att = jnp.where(mask[:, None, None, :] > 0, att, -1e9)
         o = jnp.einsum("bhij,bhjd->bhid", jax.nn.softmax(att, -1), rs(v))
         h = h + o.transpose(0, 2, 1, 3).reshape(b, n, d) @ blk["proj"]
@@ -185,10 +263,15 @@ def mse(pred, y):
 def run(a):
     print("building exact Jones targets (state sum, verified against the "
           "literature) ...", flush=True)
-    Wtr, Ytr, Str, Ltr = B.build(a.train_n, len_range=(a.lmin, a.lmax), seed=1)
-    Wte, Yte, Ste, Lte = B.build(a.test_n, len_range=(a.lmin, a.lmax), seed=2)
+    Wtr, Ytr, Str, Ltr = B.build(a.train_n, len_range=(a.lmin, a.lmax), seed=1,
+                                 pure=a.pure)
+    Wte, Yte, Ste, Lte = B.build(a.test_n, len_range=(a.lmin, a.lmax), seed=2,
+                                 pure=a.pure)
     Wex, Yex, Sex, Lex = B.build(a.test_n, len_range=(a.lmax + 2, a.lmax + 6),
-                                 seed=3)
+                                 seed=3, pure=a.pure)
+    if a.pure:
+        print("PURE BRAIDS ONLY: every word has the identity permutation, so "
+              "strand tracking carries no information", flush=True)
     smax, lmax = 4, a.lmax + 6
     vocab = B.VOCAB(smax)
     mu, sd = Ytr.mean(0), Ytr.std(0) + 1e-8
@@ -208,7 +291,7 @@ def run(a):
     for name in a.models:
         key = jax.random.PRNGKey(a.seed)
         if name.startswith("braid"):
-            p = init_braid(key, smax, a.d, vocab)
+            p = init_braid(key, smax, a.d, vocab, tie_r=a.tie_r)
             fwd = lambda p, x, m: braid_forward(p, x, m, smax, a.d)
             wy = a.w_ybe if name == "braid-ybe" else 0.0
             def loss(p, x, m, y, wy=wy):
@@ -220,10 +303,14 @@ def run(a):
             # one has to be too.
             target = 32 * a.d ** 2
             layers = 2
-            width = min(range(8, 200, 4),
+            # step 8 so that width/heads is even and rotary pairs line up
+            width = min(range(8, 200, 8),
                         key=lambda w: abs(24 * w ** 2 - target))
             p = init_tf(key, vocab, lmax, layers, width, a.heads)
-            fwd = lambda p, x, m: _pool(p, x, m, a.heads)
+            use_pos = name not in ("tf-nope", "tf-rope")
+            rope = (name == "tf-rope")
+            fwd = (lambda p, x, m, u=use_pos, r=rope:
+                   _pool(p, x, m, a.heads, u, r, a.rope_base))
             def loss(p, x, m, y):
                 return mse(fwd(p, x, m), y)
         npar = sum(v.size for v in jax.tree.leaves(p))
@@ -287,4 +374,12 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-ybe", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rope-base", type=float, default=8.0,
+                    help="rotary base; 10000 is tuned for long contexts and "
+                         "wastes 3 of 4 bands at length 16")
+    ap.add_argument("--tie-r", action="store_true",
+                    help="one R per sign, applied at every position -- makes "
+                         "ybe_residual genuinely Reidemeister III")
+    ap.add_argument("--pure", action="store_true",
+                    help="restrict to pure braids (identity permutation)")
     run(ap.parse_args())
