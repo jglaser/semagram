@@ -45,15 +45,23 @@ A braid on `s` strands is a word in generators `sigma_1 .. sigma_{s-1}` and
 their inverses. So the state is **one vector per strand**, `(batch, s, d)`, and
 a letter applies a learned map to the two strands it touches, leaving the rest
 alone. Reading the word left to right *is* the braid representation, with
-learned matrices where a physicist would put the R-matrix. The closure of a
-braid is a trace, so the readout pools over strands.
+learned matrices where a physicist would put the R-matrix.
+
+The readout mean-pools over strands, and **that is a known gap, not a trace.**
+A trace has `tr(ABC) = tr(BCA)`, which is conjugation invariance; mean pooling
+has no cyclic property at all. Since the target is a *closure* invariant and
+Markov's theorem says closure equivalence needs conjugation and stabilisation on
+top of the braid relations, the model is invariant under a strict subgroup of
+what the target respects. The dose-response below is the argument for fixing it:
+more of the right invariance bought more extrapolation up to `w = 10`, and
+conjugation is the next available dose.
 
 ```python
 x = broadcast(p["x0"], (b, s, d))              # one vector per strand
 for (i, sign) in word:                         # each letter of the braid
     pair   = x[:, i:i+2]                       # the two strands it touches
     x[:, i:i+2] = tanh(R[token] @ pair.flat)   # a learned 2-strand map
-return mlp(mean(x, axis=strands))              # closure = trace = pool
+return mlp(mean(x, axis=strands))              # pooled, NOT a trace -- see below
 ```
 
 The braid relation `R_i R_{i+1} R_i = R_{i+1} R_i R_{i+1}` is exactly the
@@ -75,7 +83,7 @@ fair comparisons.
 | `braid`, no penalty | 34.2k | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
 | `braid-ybe`, untied R | 34.2k | 0.681 +/- 0.005 | 0.186 +/- 0.012 |
 | **`braid-ybe`, tied R** | 29.4k | **0.760 +/- 0.005** | **0.269 +/- 0.015** |
-| **`braid-ybe`, tied R** | **13.4k** | 0.730 | **0.267** |
+| **`braid-ybe`, tied R** | **13.4k** | 0.730 +/- 0.001 | **0.267 +/- 0.000** (n=2) |
 
 ![In-distribution versus extrapolation](docs/fig3_extrapolation.svg)
 
@@ -88,8 +96,9 @@ buy nothing by themselves. Everything below is about the penalty.
 **Tying R is what makes the penalty mean anything.** With one map per sign
 applied at every position -- which is what a braid representation is -- the
 model reaches 0.269, and the `d = 32` version does the same at **13.4k
-parameters against the baseline's 40.3k**. The two widths agree to 0.002, so
-this is tying rather than capacity.
+parameters against the baseline's 40.3k**. The two widths land at 0.269 +/-
+0.015 (n=3) and 0.267 +/- 0.000 (n=2); the point is that halving the parameters
+costs nothing measurable, not that the gap is precisely 0.002.
 
 ## The mechanism, measured at every link
 
@@ -176,6 +185,244 @@ never the axis. A symmetry has to be **hard enough to be worth having** --
 Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
 behind**.
 
+## Does scale eat the prior?
+
+The standard objection to any architectural prior, and it is a good one: the
+prior wins in the small-data, small-model corner and the gap closes as either
+axis grows, because a flexible model eventually learns from data what the rigid
+one was handed. If that happens here then "1.54x at one third the parameters"
+is a fact about a budget rather than about braids. `scaling.py` sweeps both
+axes one at a time, re-matching the transformer at every point.
+
+**Data, at fixed width (`d = 32`, 6000 steps, three seeds per cell):**
+
+| train n | braid ext R2 | `tf-rope` ext R2 | difference | ratio |
+|---|---|---|---|---|
+| 1,500 | -0.258 +/- 0.081 | -0.088 +/- 0.020 | **-0.170** | *both below chance* |
+| 5,000 | 0.115 +/- 0.003 | 0.063 +/- 0.007 | 0.052 +/- 0.008 | 1.82 |
+| 15,000 | 0.243 +/- 0.007 | 0.139 +/- 0.013 | 0.104 +/- 0.014 | 1.75 |
+| 45,000 | **0.276 +/- 0.006** | 0.148 +/- 0.006 | **0.128 +/- 0.010** | 1.86 |
+
+**Scale does not eat the prior.** Across a 9x data range the ratio is flat at
+~1.8 and the difference grows monotonically, 0.052 -> 0.104 -> 0.128. Nothing
+here is trending toward parity.
+
+**At 1,500 braids the prior actively HURTS** -- the braid layer is 0.170 *below*
+the transformer, both of them under chance. So this is not a small-data crutch;
+in the regime where such a crutch is supposed to pay, it costs.
+
+Two claims from the single-seed version of this table are **withdrawn**, and
+they are worth naming because both were noise that happened to flatter the
+architecture. The ratio does *not* jump to 1.95 at 45,000 -- that reading came
+from a transformer denominator of 0.144 against 0.145 one row up, a difference
+of a thousandth against a seed spread of +/- 0.013, and with three seeds the
+ratio column is flat instead. And the difference does *not* grow linearly in
+log-data: the single-seed increments were +0.047 and +0.047, which looked like a
+law, and the replicated increments are **+0.053 and +0.023**. The gap widens
+with data and the widening decelerates.
+
+**Parameters, at fixed data.** Matching is only honest at the top of this range
+-- the transformer width search steps by 8 and its embedding table dominates at
+small widths -- so each row carries its actual counts and the direction of the
+mismatch. Seed 0 only:
+
+| d | braid par | tf par | braid ext | tf ext | ratio | matched? |
+|---|---|---|---|---|---|---|
+| 8 | 1,062 | 1,925 | 0.094 | 0.066 | 1.42 | tf has **1.81x** more |
+| 16 | 3,654 | 1,925 | 0.190 | 0.066 | 2.87 | tf has **0.53x** -- *not a comparison* |
+| 32 | 13,446 | 14,965 | 0.236 | 0.145 | 1.62 | 1.11x |
+| 32 | 13,446 | 14,965 | 0.223 | 0.135 | 1.65 | 1.11x, 3000 steps |
+| 64 | 51,462 | 57,565 | 0.221 | 0.160 | **1.38** | 1.12x, 3000 steps |
+
+The `d = 16` row is not a comparison and is shown only for completeness. The
+last two rows are matched to ~12% and to each other at an equal step budget.
+**On this axis the gap narrows, 1.65 to 1.38 for a 4x parameter increase**, with
+the braid layer flat (0.223 -> 0.221) while the transformer gains.
+
+That narrowing has two possible causes -- capacity outrunning the prior, or the
+braid layer having exhausted what 15,000 braids can teach it -- and one joint
+cell separates them, because sweeping one axis at a time leaves the ambiguity in
+exactly one corner. Run `d = 64` at 45,000 braids:
+
+| `d = 64`, 3000 steps | braid ext | tf ext | difference | ratio |
+|---|---|---|---|---|
+| 15,000 braids | 0.221 | 0.160 | 0.061 | 1.38 |
+| **45,000 braids** | **0.298** | 0.163 | **0.135** | **1.83** |
+
+**The narrowing reverses.** Given more data the wide braid layer climbs off
+0.221 to 0.298 -- its best extrapolation score anywhere in this repo -- while
+the transformer stays put at 0.160 -> 0.163. So `d = 64` was data-starved, not
+saturated, and the parameter axis was measuring a data limit that the width
+sweep held fixed by construction. Capacity helps *if* there is data to spend it
+on: 0.298 at `d = 64` against 0.276 at `d = 32`, both at 45,000.
+
+**The summary the evidence supports:** the prior is not a small-data crutch and
+is not eaten by scale on either axis. The ratio holds near 1.8 across a 9x data
+range and recovers to 1.83 at 4x the parameters. The advantage grows with data,
+decelerating; the parameter axis narrows only where data is the binding
+constraint. What these numbers do *not* license is extrapolation to much larger
+models -- the widest point here is 51k parameters, and the joint cell is one
+seed.
+
+## Train on 3 strands, run on 5
+
+Every other number here is a score on a fixed problem size. This one is a
+capability, and tying `R` is what makes it possible: the layer holds one map per
+sign and lifts it to whichever adjacent pair a letter names, so nothing in it is
+indexed by strand count.
+
+Trained on 3-strand braids only, `--knots-only` throughout:
+
+| model | 3 strands | 4 strands | 5 strands |
+|---|---|---|---|
+| **tied** | 0.955 +/- 0.002 | **0.563 +/- 0.007** | **0.376 +/- 0.012** |
+| untied | 0.968 +/- 0.000 | 0.256 +/- 0.008 | 0.135 +/- 0.009 |
+
+Three seeds each. The tied layer keeps **39% of its in-distribution R2 at a
+strand count it has never seen**, while being *worse* in distribution (0.955
+against 0.968), which rules out capacity as the explanation.
+
+**No ratio is quoted against the untied control, deliberately.** `R[sigma_3]`
+never receives a gradient, so at five strands the untied model is reading two of
+its matrices off random initialisation -- structurally the same situation as the
+`pos[10:16]` defect this file retracts elsewhere. A ratio there would measure
+possible against impossible, not degree of advantage, and quoting one would
+repeat the error that produced the retracted 3.4x. The control establishes that
+tying is what makes the column enterable; 0.376 from three-strand training
+carries the result on its own.
+
+**A transformer cannot be run in this column at all.** Its input is a token per
+generator, so a 5-strand word contains symbols whose embedding rows do not exist
+in a model trained on 3 strands. This is not a beaten baseline; it is a
+direction the comparison cannot be made in.
+
+This benchmark was confounded on the first attempt, by me. The closure of an
+`s`-strand braid has as many components as its permutation has cycles, so
+raising the strand count changes *what the target is*: 1.88 components at 3
+strands against 2.77 at 5, with Jones values 3.15x more spread under 3-strand
+normalisation. Scored that way the tied model appeared to collapse (0.932 ->
+0.063) and the untied control appeared to do *better*, which is impossible and
+is what prompted the check. `--knots-only` keeps single-component closures at
+every strand count, and each test set is now scored both against the training
+normalisation and against its own variance so any residual shift stays visible.
+
+## What more symmetry buys: nothing, and why
+
+The dose-response is monotone up to `w = 10`, so the natural next step is more
+of the right invariance. Markov's theorem says closure equivalence needs
+conjugation and stabilisation on top of the braid relations, and the readout
+provides neither. Measured, against the tied `d = 32` baseline at 0.267:
+
+| | extrapolation R2 | delta |
+|---|---|---|
+| tied baseline | 0.267 +/- 0.000 (n=2) | -- |
+| + Reidemeister II (`w_inv = 1`) | 0.268 +/- 0.008 (n=3) | **+0.001** |
+| + conjugation (`w_conj = 1`) | 0.252 | -0.015 |
+| + conjugation (`w_conj = 10`) | 0.210 | **-0.057** |
+| + both | 0.196 | -0.071 |
+
+Reidemeister II is **nothing**: +0.001 over three seeds. A single seed had shown
++0.009 and that was noise.
+
+**Conjugation hurts, and worse the harder it is pushed.** The reason is
+structural rather than a tuning failure: mean pooling has no cyclic property, so
+conjugation invariance is a property this readout *cannot have*. The only way to
+reduce `||f(a b a^-1) - f(b)||` is to become insensitive to the added letters --
+that is, more constant. **A penalty cannot install a property the architecture
+forbids; it can only buy it with capacity.**
+
+So the fix is not a weight -- the readout has to become genuinely trace-like.
+`trace_layer.py` does exactly that, and it settles the question in the other
+direction.
+
+**Conjugation invariance, installed rather than charged for.** Accumulate a
+matrix along the word instead of a vector, `M <- G(i, sign) @ M` from `M_0 = I`,
+and read out class functions -- `tr(M^j)` for `j = 1..n`, which by Newton's
+identities determines the characteristic polynomial. That is the complete
+conjugation invariant **for generic `M`** and not in general: the power sums fix
+the eigenvalue multiset, but two matrices can share a characteristic polynomial
+and differ in Jordan structure. A learned `blk` is regular semisimple with
+probability one, so the distinction does not bite here -- it is stated because
+it is true. `tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two
+conditions make it exact and both were missing before: `G(i, -1)` must invert
+`G(i, +1)`, which is Reidemeister II and is here **computed rather than
+penalised**; and `G` must act where the letter names while being the same map
+everywhere, which is what tying achieved. This is the shape of the reduced Burau
+representation with a learned block.
+
+*The first version of this readout was rigged, and the fix mattered.* It used
+four features -- `tr(M)`, `tr(M^2)`, `log|det M|` and its sign -- and two of the
+four were the same thing. Every `_embed` lift is the identity outside a `2k`
+block, so `det(E) = det(blk)` and hence
+
+    log|det M| = writhe * log|det blk|
+
+*exactly*: verified against this code at three writhes, agreeing to all printed
+digits. The determinant feature was **the writhe** -- a letter count any model
+gets for free -- and its sign was the parity of the same. That put a
+four-dimensional readout against mean pooling's thirty-two and attributed the
+gap to conjugation. `blk` is now normalised to `|det| = 1`, which removes the
+writhe channel by construction, and the full `n` traces are used.
+
+| model | features | test R2 | extrapolation R2 | conjugation error |
+|---|---|---|---|---|
+| tanh + mean-pool (tied) | 32 pooled | **0.730** | **0.267** | 1.86e-01 |
+| trace, 4 feats, 2 = writhe *(retracted)* | 4 | 0.259 | 0.004 | 3.7e-07 |
+| trace, `k = 3`, full invariant | 12 | 0.275 | 0.109 | **7.3e-07** |
+| trace, `k = 3`, overflow-safe log form | 12 | 0.225 | 0.064 | 1.1e-06 |
+| trace, `k = 6`, overflow-safe log form | 24 | 0.254 | 0.063 | 9.4e-07 |
+
+Removing the bottleneck moved extrapolation **0.004 to 0.109**, a factor of 27,
+so the objection was substantive. The `k = 6` row answers the width question
+directly: twenty-four exactly-invariant features against mean pooling's
+thirty-two, and it still lands at 0.063.
+
+The `k = 6` blow-up in the retracted row was also diagnosable rather than
+fundamental. `tr(M^24)` overflowed and the run went to NaN; carrying the
+magnitude in the exponent (`M^j = exp(logs) * P_hat` with `P_hat`
+unit-Frobenius, exact bookkeeping) fixes it. That costs resolution -- a signed
+log compresses -- which is why the log rows score below the direct one at
+`k = 3`. Both are kept: the direct form is the better model, the log form is the
+only one that runs at `k = 6`.
+
+The mean-pool model's conjugation error is **98.5% of its own output scale** --
+not imperfectly invariant, maximally non-invariant. The trace readout is
+**2.7e+05 times** more invariant, exactly and by construction, and it costs
+**2.4x** at extrapolation.
+
+One objection to this comparison is worth stating because it dissolves on
+inspection: the trace layer has **no nonlinearity anywhere**, so it looks like
+exact invariance is being compared against a strictly more expressive
+recurrence. It is not a separate handicap. Exactness requires
+`M(a b a^-1) = M(a) M(b) M(a)^-1`, so the word-to-matrix map must be a monoid
+homomorphism -- and a homomorphism into matrices under multiplication *is* a
+linear representation. A nonlinearity anywhere in the scan breaks the
+homomorphism and the invariance dies with it. The linearity is entailed by the
+constraint, not chosen alongside it, so the capacity it costs **is** the
+capacity conjugation invariance costs. That is the quantity being measured, and
+this layer is close to the most general exactly-conjugation-invariant model
+available.
+
+**So conjugation is not a useful symmetry for this target**, and both routes
+agree -- the penalty and the construction, which fail for different reasons. The
+Jones polynomial of a closure genuinely *is* conjugation invariant, so imposing
+it "should" help; but a target being invariant does not make the best
+*estimator* invariant. Restricting to the invariant function class is a real
+capacity cost, and here the cost exceeds the benefit.
+
+That is the same shape as the Yang-Baxter turnover, now measured on a second
+symmetry by a second method: **exactness costs capacity.**
+
+*One limit on how far this generalises.* Jones needs the **Markov** trace, which
+satisfies `tr(x sigma_n) = z tr(x)` -- the stabilisation property is what makes
+it a closure invariant, and `braids.py` uses exactly that for ground truth. The
+ordinary trace of a generic learned representation is conjugation-invariant but
+**not** stabilisation-invariant. So `trace_layer` installs one Markov move while
+using a trace that is not the one link invariants are built from. Its collapse
+is consistent with conjugation being useless here, and it is also consistent
+with the readout being the wrong trace. The penalty route is free of that
+objection and points the same way, which is why the conclusion rests on both.
+
 ## Getting the baseline right
 
 Two baselines had to be discarded first, and both flattered the layer.
@@ -211,14 +458,28 @@ the target has nothing topological in it.
 |---|---|---|---|
 | `braid` | 3.27e-02 | **1.000** | **1.000** |
 | `braid-ybe` | **1.26e-07** | **1.000** | **1.000** |
-| `tf` | -- | 0.702 | 0.018 |
+| `tf-rope` | -- | 0.542 | 0.020 |
 
-Both braid variants solve it exactly and length-generalise perfectly; the
-transformer reaches 0.702 in distribution and then falls **below chance**
-(0.042) on longer words, having fitted length-specific features that mislead.
+Rerun against the corrected rotary baseline. Both braid variants solve it
+exactly and length-generalise perfectly; the transformer reaches 0.542 in
+distribution and 0.020 on longer words, against chance at 0.042 -- i.e. it does
+not transfer at all.
 
-**Read this as weaker than it looks.** The task is an almost perfect
-architectural match -- the layer's state *is* the permutation state, so it needs
+*The correction made the baseline worse here, and that is worth saying out
+loud.* Everywhere else, repairing the transformer moved a number **against** the
+layer -- the untrained `pos` rows, then the rotary base, each time shrinking the
+gap. This is the one place it moved the other way: in distribution the
+transformer went from 0.702 with absolute positions to 0.542 with rotary at base
+8. The likely cause is over-rotation. Base 8 was tuned for the 16-token braid
+words; these permutation words are 8 tokens, so the same base spins the fast
+bands roughly twice as far per unit of distance as intended. That makes this
+particular row a comparison against a baseline tuned for a different sequence
+length, and the honest reading of the permutation result does not depend on it
+-- the braid layer is at 1.000 either way, and the reason is architectural match
+rather than symmetry.
+
+**Read this as weaker than it looks, and not because of the baseline.** The task
+is an almost perfect architectural match -- the layer's state *is* the permutation state, so it needs
 only to learn "swap these two vectors", after which length-generalisation is
 free because the layer is a recurrence. Both variants sit at 100%, so there is
 no headroom to separate the symmetry from the architecture, which was the
@@ -253,7 +514,7 @@ makes it a degenerate regression target.
 
 ## Honest limits
 
-- **Absolute extrapolation R2 is 0.225.** Every model here is poor at
+- **Absolute extrapolation R2 is 0.269.** Every model here is poor at
   generalising in crossing number; this compares degrees of failure, not a
   solved task.
 - **Three to four strands, lengths 4-16, one invariant, one architecture
@@ -272,6 +533,10 @@ makes it a degenerate regression target.
 | `braids.py` | braid words, knot closures, exact Jones polynomials (two ways) |
 | `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baselines |
 | `rIII_probe.py` | measures Reidemeister-III invariance directly, independent of the task |
+| `task_strand.py` | train on 3 strands, run on 5 -- the column no transformer can enter |
+| `trace_layer.py` | conjugation invariance by construction, via `tr(M^j)` |
+| `task_perm.py` | the same layer on permutation composition, no topology |
+| `scaling.py` | does the advantage survive more data and more parameters? |
 | `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
 | `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |

@@ -175,6 +175,28 @@ def ybe_residual(p, d):
     return tot / max(cnt, 1)
 
 
+def inverse_residual(p, d, key):
+    """Reidemeister II: sigma_i sigma_i^-1 = 1. Absent until now.
+
+    Nothing constrained `R[1]` to invert `R[0]`, so a braid word was only
+    half-well-defined: the layer could not tell a crossing from its undoing.
+    The tied residual braids sigma against sigma^-1, but the braid relation
+    between them is not the statement that they cancel.
+
+    The maps carry a tanh, so no exact inverse exists and penalising
+    `||R1 R0 - I||` on the linear part would be constraining something the
+    forward pass does not use. Penalise the ROUND TRIP on sampled states
+    instead, which is what "applying a crossing and then undoing it returns you
+    where you were" actually means for this layer.
+    """
+    if p["R"].shape[0] != 2:
+        return 0.0                      # only defined once R is tied
+    v = jax.random.normal(key, (256, 2 * d))
+    fwd = jnp.tanh(v @ p["R"][0].T + p["bR"][0])
+    back = jnp.tanh(fwd @ p["R"][1].T + p["bR"][1])
+    return jnp.mean((back - jnp.tanh(v)) ** 2)
+
+
 # ----------------------------------------------------------------------------
 # baseline
 
@@ -287,6 +309,27 @@ def run(a):
     print(f"train {len(Wtr)} (len {a.lmin}-{a.lmax}) | test {len(Wte)} | "
           f"extrapolation {len(Wex)} (len {a.lmax+2}-{a.lmax+6})\n", flush=True)
 
+    # Conjugation pairs, built once. The target is a CLOSURE invariant and by
+    # Markov's theorem closure equivalence needs conjugation as well as the
+    # braid relations, but the readout mean-pools and mean pooling has no
+    # cyclic property. So f(a b a^-1) = f(b) is a symmetry the target has and
+    # the model does not -- sampled here rather than derived.
+    if a.w_conj > 0:
+        rngc = np.random.default_rng(11)
+        base_w, conj_w = [], []
+        for w in Wtr[:a.conj_n]:
+            s_ = 4
+            al = [(int(rngc.integers(0, s_ - 1)), int(rngc.choice([-1, 1])))
+                  for _ in range(int(rngc.integers(1, 3)))]
+            inv = [(i, -g) for (i, g) in reversed(al)]
+            if len(al) * 2 + len(w) > lmax:
+                continue
+            base_w.append(w)
+            conj_w.append(al + list(w) + inv)
+        Xb, Mb = enc(base_w); Xc, Mc = enc(conj_w)
+        Xb, Mb, Xc, Mc = map(jnp.asarray, (Xb, Mb, Xc, Mc))
+        print(f"conjugation pairs: {Xb.shape[0]}", flush=True)
+
     results = {}
     for name in a.models:
         key = jax.random.PRNGKey(a.seed)
@@ -294,24 +337,40 @@ def run(a):
             p = init_braid(key, smax, a.d, vocab, tie_r=a.tie_r)
             fwd = lambda p, x, m: braid_forward(p, x, m, smax, a.d)
             wy = a.w_ybe if name == "braid-ybe" else 0.0
-            def loss(p, x, m, y, wy=wy):
+            def loss(p, x, m, y, k, wy=wy):
                 l = mse(fwd(p, x, m), y)
-                return l + wy * ybe_residual(p, a.d) if wy > 0 else l
+                if wy > 0:
+                    l = l + wy * ybe_residual(p, a.d)
+                if a.w_inv > 0:
+                    l = l + a.w_inv * inverse_residual(p, a.d, k)
+                if a.w_conj > 0:
+                    j = jax.random.randint(k, (64,), 0, Xb.shape[0])
+                    l = l + a.w_conj * jnp.mean(
+                        (fwd(p, Xb[j], Mb[j]) - fwd(p, Xc[j], Mc[j])) ** 2)
+                return l
         else:
-            # parameter-match the transformer to the braided model rather than
-            # picking a width. Part II's comparisons were all matched and this
-            # one has to be too.
-            target = 32 * a.d ** 2
+            # Parameter-match by MEASURING the braid model, not by estimating
+            # it. The old `32 * d**2` formula was fitted to the untied layer;
+            # tying changed the true count roughly threefold, so it aimed the
+            # baseline at a number that no longer existed. Since the headline
+            # claim is specifically about parameter budget, the matcher has to
+            # track whatever the braid model actually costs.
+            probe = init_braid(jax.random.PRNGKey(0), smax, a.d, vocab,
+                               tie_r=a.tie_r)
+            target = sum(v.size for v in jax.tree.leaves(probe))
             layers = 2
             # step 8 so that width/heads is even and rotary pairs line up
-            width = min(range(8, 200, 8),
-                        key=lambda w: abs(24 * w ** 2 - target))
+            def _tf_size(w):
+                q = init_tf(jax.random.PRNGKey(0), vocab, lmax, layers, w,
+                            a.heads)
+                return sum(v.size for v in jax.tree.leaves(q))
+            width = min(range(8, 200, 8), key=lambda w: abs(_tf_size(w) - target))
             p = init_tf(key, vocab, lmax, layers, width, a.heads)
             use_pos = name not in ("tf-nope", "tf-rope")
             rope = (name == "tf-rope")
             fwd = (lambda p, x, m, u=use_pos, r=rope:
                    _pool(p, x, m, a.heads, u, r, a.rope_base))
-            def loss(p, x, m, y):
+            def loss(p, x, m, y, k):
                 return mse(fwd(p, x, m), y)
         npar = sum(v.size for v in jax.tree.leaves(p))
         opt = optax.adamw(optax.warmup_cosine_decay_schedule(
@@ -320,8 +379,8 @@ def run(a):
         st = opt.init(p)
 
         @jax.jit
-        def step(p, st, x, m, y):
-            l, g = jax.value_and_grad(loss)(p, x, m, y)
+        def step(p, st, x, m, y, k):
+            l, g = jax.value_and_grad(loss)(p, x, m, y, k)
             u, st = opt.update(g, st, p)
             return optax.apply_updates(p, u), st, l
 
@@ -329,13 +388,16 @@ def run(a):
         for it in range(1, a.steps + 1):
             key, k1 = jax.random.split(key)
             idx = jax.random.randint(k1, (a.batch,), 0, Xtr.shape[0])
-            p, st, l = step(p, st, Xtr[idx], Mtr[idx], Ytr_[idx])
+            key, k2 = jax.random.split(key)
+            p, st, l = step(p, st, Xtr[idx], Mtr[idx], Ytr_[idx], k2)
             if it % max(a.steps // 4, 1) == 0:
                 print(f"  {name:10s} {it:5d}/{a.steps} loss {float(l):.4f} "
                       f"| {time.time()-t0:4.0f}s", flush=True)
         row = {"params": npar,
                "ybe": float(ybe_residual(p, a.d)) if name.startswith("braid")
-               else float("nan")}
+               else float("nan"),
+               "inv": (float(inverse_residual(p, a.d, jax.random.PRNGKey(3)))
+                       if name.startswith("braid") else float("nan"))}
         for tag, (x, m, y) in packs.items():
             pr = fwd(p, x, m)
             row[tag] = float(mse(pr, y))
@@ -374,6 +436,15 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-ybe", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--conj-n", type=int, default=4000,
+                    help="how many conjugation pairs to build")
+    ap.add_argument("--w-inv", type=float, default=0.0,
+                    help="Reidemeister II: penalise the sigma/sigma^-1 round "
+                         "trip. Requires --tie-r")
+    ap.add_argument("--w-conj", type=float, default=0.0,
+                    help="conjugation invariance, f(a b a^-1) = f(b). Markov's "
+                         "theorem needs this on top of the braid relations, "
+                         "and the readout's mean-pool does not provide it")
     ap.add_argument("--rope-base", type=float, default=8.0,
                     help="rotary base; 10000 is tuned for long contexts and "
                          "wastes 3 of 4 bands at length 16")
