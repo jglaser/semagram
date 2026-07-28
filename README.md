@@ -255,6 +255,68 @@ variational structure is bookkeeping -- a recurrence that an energy happened to
 generate, rather than a model that solves a variational problem. Running that
 one test first would have saved this architecture a great deal of theory.
 
+## Result 8: using the diagnostic to design an objective
+
+Result 5's diagnostic produces a number -- the variational gap, `NLL(argmin S) -
+NLL(unroll)`, measured at +0.329 nats with `||grad S||` at 137 where the true
+minimum has 0.003. A measured number can be optimised against, so `w_stat` adds
+`mean_free((grad_x S)^2)` to the training loss. What moves under that pressure
+is not only the state but the parameters, so this asks whether the energy family
+admits a parameterisation whose minimum is also good.
+
+| `w_stat` | task NLL | acc | `\|grad S\|` at unroll | variational gap |
+|---|---|---|---|---|
+| 0 (baseline) | 3.384 | 0.057 | 136.8 | **+0.329** |
+| 0.03 | 3.378 | 0.060 | 65.4 | **+0.039** |
+| 0.3 | **3.358** | **0.069** | 41.4 | +1.737 |
+| 3 | 3.416 | 0.061 | 11.5 | +1.676 |
+
+Three things, and only the first is the intended one.
+
+**The gradient norm falls as designed, and at low weight the gap nearly
+closes** -- +0.329 to +0.039, an 8.5x reduction, at no task cost. In that regime
+the diagnostic did exactly what it was supposed to do.
+
+**At higher weight the objective is gamed, and the flaw is in how it was
+written.** The penalty is `||grad S||` *at the network's output*, which can be
+satisfied two ways: move the output to the minimum, or flatten the energy where
+the output already is. The second is cheaper, and the model takes it -- by
+`w_stat = 0.3` the gradient norm is down to 41 while the true minimum has
+wandered off to NLL 5.11, so the gap is four times *worse* than baseline. A
+small gradient is not the same as being at the minimum, and a proxy for
+stationarity is not stationarity. The correct version of this experiment trains
+through a converged fixed point with implicit differentiation, where the
+identity holds by construction and cannot be gamed.
+
+**Closing the gap does not buy the capability it was supposed to buy.** Result 4
+argued the constraint failed for want of solver budget. If that were the whole
+story, `sema-stat0.03` -- gap +0.039 -- should absorb a constraint term where
+the baseline could not. It does worse:
+
+| model | gap | soft closure, `w` = 0 -> 0.3 -> 1 |
+|---|---|---|
+| `sema-so2` | +0.329 | 0.1754 -> **0.1697** -> 0.1722 |
+| `sema-stat0.03` | +0.039 | 0.1734 -> 0.1839 -> 0.1996 |
+| `sema-stat0.3` | +1.737 | **0.1567** -> 0.1655 -> 0.1944 |
+
+The near-stationary model degrades monotonically from `w = 0`, while the
+baseline at least dips. So the blocker in Result 4 was never the variational
+gap. It is the readout: the constraint reaches the state only through
+`logits -> softmax -> expected angle`, and the directions that change the
+decoded angle are the same directions that change the content prediction. With a
+32-way categorical there is no spare capacity to satisfy a constraint without
+moving the answer. That is the third independent argument in this file for a
+continuous-valued head.
+
+The one thing that did come out ahead is worth stating plainly, because it is
+the only unambiguous improvement in Part II: `w_stat = 0.3` gives the best task
+NLL of any Semagram variant here (3.358 against a 3.397 +/- 0.013 baseline),
+the best accuracy (0.069 against 0.057), and the best unconstrained closure
+(0.1567 against 0.1754). The stationarity penalty works as a regulariser even
+though it fails as a route to a genuine energy model. Single seed at the time of
+writing, which is exactly the sort of claim this repository is supposed to
+distrust, so it is being replicated.
+
 ## What was tried and did not work
 
 Each was a plausible mechanism, measured and dropped. The negative results were
@@ -855,6 +917,8 @@ dropped or replaced.
 | negative curvature is what stops the solve converging (my own Result 4 claim) | refuted -- the Hessian at the minimum is PD, +5.69 to +2304 |
 | the even-kernel prohibition is what the layer needs most | a scalar action provably cannot express a directed convolution (verified 2e-16), and handing it one anyway is worth -0.002 nats against a 0.013 seed spread |
 | an energy model conditions on arbitrary subsets better than a masked one | refuted: on scattered/periodic masks `tf-abs` improves (-0.013) and Semagram degrades (+0.091) |
+| penalising `\|grad S\|` at the output makes the model its own minimiser | gamed above `w_stat` 0.1 -- the energy flattens under the output and the gap goes +0.329 -> +1.737 |
+| closing the variational gap unlocks test-time constraints | refuted: the near-stationary model responds *worse*; the blocker is the categorical readout |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
