@@ -316,19 +316,15 @@ the target has nothing topological in it.
 |---|---|---|---|
 | `braid` | 3.27e-02 | **1.000** | **1.000** |
 | `braid-ybe` | **1.26e-07** | **1.000** | **1.000** |
-| `tf` | -- | 0.702 | 0.018 |
+| `tf-rope` | -- | 0.542 | 0.020 |
 
-Both braid variants solve it exactly and length-generalise perfectly.
+Rerun against the corrected rotary baseline. Both braid variants solve it
+exactly and length-generalise perfectly; the transformer reaches 0.542 in
+distribution and 0.020 on longer words, against chance at 0.042 -- i.e. it does
+not transfer at all.
 
-**The transformer row here is not usable and is left out deliberately.**
-`task_perm.py` was written before the baseline was corrected and still builds
-the learned-absolute-position model, whose rows `pos[10:16]` receive no
-gradient -- the same defect retracted two sections above. Quoting its collapse
-would mean relying on a baseline this file disowns. The braid rows stand on
-their own, since they are compared against each other.
-
-**Read this as weaker than it looks.** The task is an almost perfect
-architectural match -- the layer's state *is* the permutation state, so it needs
+**Read this as weaker than it looks, and not because of the baseline.** The task
+is an almost perfect architectural match -- the layer's state *is* the permutation state, so it needs
 only to learn "swap these two vectors", after which length-generalisation is
 free because the layer is a recurrence. Both variants sit at 100%, so there is
 no headroom to separate the symmetry from the architecture, which was the
