@@ -62,16 +62,47 @@ import optax
 import braids as B
 
 
-def init(key, s_max, k, n_out=6):
+def init(key, s_max, k, n_out=6, width=128):
+    """Readout width is `s_max * k` -- the COMPLETE conjugation invariant.
+
+    The first version used four features: tr(M), tr(M^2), log|det M| and its
+    sign. Two of those four were the same thing, and it was not an invariant at
+    all. Every `_embed` lift is the identity outside a 2k block, so
+    det(E) = det(blk), hence
+
+        log|det M| = writhe * log|det blk|
+
+    exactly -- verified to five decimals against this code. The determinant
+    feature was the WRITHE times a learned scalar, and its sign was the parity
+    of the same. The writhe is a letter count; any model gets it for free and
+    nothing about conjugation is involved.
+
+    So that comparison had a four-dimensional readout against the mean-pool
+    model's thirty-two, and the gap was attributed to conjugation invariance.
+    It was a bottleneck I chose. Conjugation invariance does not require one:
+    the complete invariant of an n x n matrix is its characteristic polynomial,
+    equivalently the power sums tr(M^j) for j = 1..n by Newton's identities. At
+    s = 4, k = 3 that is twelve exactly-invariant features, and two were used.
+
+    `blk` is also normalised to |det| = 1, which kills the writhe channel by
+    construction and keeps the accumulated product better conditioned.
+    """
     kk = jax.random.split(key, 4)
+    nf = s_max * k
     return {
-        # one learned 2k x 2k block, applied at whichever pair a letter names
         "blk": jnp.eye(2 * k) + jax.random.normal(kk[0], (2 * k, 2 * k)) * 0.05,
-        "feat": jax.random.normal(kk[1], (4, 32)) * 0.5,
-        "bf": jnp.zeros((32,)),
-        "out": jax.random.normal(kk[2], (32, n_out)) * (1 / np.sqrt(32)),
+        "feat": jax.random.normal(kk[1], (nf, width)) * (1 / np.sqrt(nf)),
+        "bf": jnp.zeros((width,)),
+        "out": jax.random.normal(kk[2], (width, n_out)) * (1 / np.sqrt(width)),
         "bo": jnp.zeros((n_out,)),
     }
+
+
+def _unimodular(blk, k):
+    """Scale to |det| = 1. Conjugation invariance is untouched (a scalar
+    multiple commutes with everything) and the writhe channel disappears."""
+    ld = jnp.linalg.slogdet(blk)[1]
+    return blk * jnp.exp(-ld / (2 * k))
 
 
 def _embed(blk, i, s, k):
@@ -93,23 +124,29 @@ def forward(p, toks, mask, s, k):
     """
     b, L = toks.shape
     n = s * k
-    inv_blk = jnp.linalg.inv(p["blk"])          # Reidemeister II, by construction
+    blk = _unimodular(p["blk"], k)
+    inv_blk = jnp.linalg.inv(blk)               # Reidemeister II, by construction
 
     def step(M, t):
         tok = toks[:, t]
         live = mask[:, t][:, None, None]
         i = jnp.clip((tok - 1) // 2, 0, s - 2)
         sign = (tok - 1) % 2                     # 0 = sigma, 1 = sigma^-1
-        blk = jnp.where(sign[:, None, None] == 0, p["blk"], inv_blk)
-        G = jax.vmap(lambda ii, bb: _embed(bb, ii, s, k))(i, blk)
+        bb = jnp.where(sign[:, None, None] == 0, blk, inv_blk)
+        G = jax.vmap(lambda ii, b_: _embed(b_, ii, s, k))(i, bb)
         return jnp.where(live > 0, G @ M, M), None
 
     M = jnp.broadcast_to(jnp.eye(n), (b, n, n))
     M, _ = jax.lax.scan(step, M, jnp.arange(L))
-    t1 = jnp.trace(M, axis1=1, axis2=2) / n
-    t2 = jnp.trace(M @ M, axis1=1, axis2=2) / n
-    sgn, ld = jnp.linalg.slogdet(M)
-    f = jnp.stack([t1, t2, ld / n, sgn], -1)
+    # tr(M^j) for j = 1..n: the complete set of conjugation invariants, by
+    # Newton's identities equivalent to the characteristic polynomial. No
+    # bottleneck, and no writhe -- blk is unimodular, so det(M) = 1 identically.
+    feats, P = [], jnp.broadcast_to(jnp.eye(n), M.shape)
+    for _ in range(n):
+        P = P @ M
+        feats.append(jnp.trace(P, axis1=1, axis2=2) / n)
+    f = jnp.stack(feats, -1)
+    f = f / (1.0 + jnp.abs(f))            # squash: tr(M^j) grows with j
     return jax.nn.gelu(f @ p["feat"] + p["bf"]) @ p["out"] + p["bo"]
 
 

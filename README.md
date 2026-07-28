@@ -199,11 +199,18 @@ Trained on 3-strand braids only, `--knots-only` throughout:
 | **tied** | 0.955 +/- 0.002 | **0.563 +/- 0.007** | **0.376 +/- 0.012** |
 | untied | 0.968 +/- 0.000 | 0.256 +/- 0.008 | 0.135 +/- 0.009 |
 
-Three seeds each. The tied layer keeps **39% of its in-distribution R2 at 5
-strands**, and beats the untied control **2.20x at 4 strands and 2.78x at 5** --
-while being *worse* in distribution (0.955 against 0.968), which rules out
-capacity as the explanation. Untied degrades as the algebra requires:
-`R[sigma_3]` never receives a gradient.
+Three seeds each. The tied layer keeps **39% of its in-distribution R2 at a
+strand count it has never seen**, while being *worse* in distribution (0.955
+against 0.968), which rules out capacity as the explanation.
+
+**No ratio is quoted against the untied control, deliberately.** `R[sigma_3]`
+never receives a gradient, so at five strands the untied model is reading two of
+its matrices off random initialisation -- structurally the same situation as the
+`pos[10:16]` defect this file retracts elsewhere. A ratio there would measure
+possible against impossible, not degree of advantage, and quoting one would
+repeat the error that produced the retracted 3.4x. The control establishes that
+tying is what makes the column enterable; 0.376 from three-strand training
+carries the result on its own.
 
 **A transformer cannot be run in this column at all.** Its input is a token per
 generator, so a 5-strand word contains symbols whose embedding rows do not exist
