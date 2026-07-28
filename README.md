@@ -434,13 +434,31 @@ weight, with everything else identical (seed 0):
 | 1 | 1.68e-02 | 0.683 | 0.199 |
 | 3 | 7.89e-03 | 0.699 | 0.213 |
 | 10 | 3.35e-03 | 0.700 | **0.225** |
+| 30 | 1.15e-03 | 0.682 | 0.208 |
+| 100 | 2.90e-04 | 0.664 | 0.190 |
 
-Monotone in both columns over a 35x range of residual, with
-`corr(log YBE residual, extrapolation R2) = -0.987`. The closer the learned maps
-come to satisfying the braid relation, the better the model generalises, and
-nothing else is varying. That is the evidence that the SYMMETRY is doing the
-work rather than the strand-shaped architecture around it -- at `w = 10` the
-extrapolation R2 is 7.8x the transformer's 0.029.
+Up to `w = 10` this is monotone in both columns across a 35x range of residual
+(`corr(log YBE residual, extrapolation R2) = -0.987` over that range), which is
+the evidence that the SYMMETRY is doing the work rather than the strand-shaped
+architecture carrying it: nothing else varies. At the peak the extrapolation R2
+is **7.8x** the transformer's 0.029.
+
+**Then it turns over, and that is the more interesting half.** Enforcement
+tighter than `3e-03` residual costs generalisation -- pushing to `2.9e-04` gives
+back 0.035 of extrapolation R2. The ordering is
+
+    soft (0.225)  >  exact (0.190)  >  none (0.141)  >>  transformer (0.029)
+
+so every level of the symmetry beats having none and all of them beat the
+transformer, but **approximate invariance beats exact invariance**. Yang-Baxter
+solutions are a measure-zero variety; forcing the learned maps exactly onto it
+removes capacity the model needs to fit with. The peak-versus-endpoint
+differences are 0.017 to 0.035 against a three-seed spread of 0.012 measured at
+`w = 1`, so the turnover is suggestive at one seed rather than established.
+
+That is also the sentence this whole repository has been circling. Part II built
+its symmetries in EXACTLY -- shift-equivariance to 1e-15 -- and they were worth
+nothing. Exactness was never the point. The right AMOUNT of bias is.
 
 **And the gain is concentrated where a correct inductive bias should put it.**
 In distribution, where data is plentiful, the built-in symmetry is worth 0.038;
