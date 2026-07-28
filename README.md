@@ -185,6 +185,62 @@ never the axis. A symmetry has to be **hard enough to be worth having** --
 Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
 behind**.
 
+## Does scale eat the prior?
+
+The standard objection to any architectural prior, and it is a good one: the
+prior wins in the small-data, small-model corner and the gap closes as either
+axis grows, because a flexible model eventually learns from data what the rigid
+one was handed. If that happens here then "1.54x at one third the parameters"
+is a fact about a budget rather than about braids. `scaling.py` sweeps both
+axes one at a time, re-matching the transformer at every point.
+
+**Data, at fixed width (`d = 32`, 6000 steps):**
+
+| train n | braid ext R2 | `tf-rope` ext R2 | ratio |
+|---|---|---|---|
+| 1,500 | -0.335 | -0.085 | *both below chance* |
+| 5,000 | 0.113 | 0.069 | 1.63 |
+| 15,000 | 0.236 | 0.145 | 1.62 |
+| 45,000 | **0.282** | 0.144 | **1.95** |
+
+**The gap does not close with data; it widens.** Over a 30x range the
+transformer's extrapolation plateaus at ~0.145 while the braid layer keeps
+improving, and the ratio goes 1.63 -> 1.62 -> 1.95. Note also the bottom row:
+at 1,500 braids **both models are below chance**, so the prior is not winning a
+small-data corner either. That is the opposite of the failure mode the
+objection describes.
+
+**Parameters, at fixed data (15,000 braids).** Matching is only honest at the
+top of this range -- the transformer width search steps by 8 and its embedding
+table dominates at small widths -- so each row carries its actual counts and
+the direction of the mismatch:
+
+| d | braid par | tf par | braid ext | tf ext | ratio | matched? |
+|---|---|---|---|---|---|---|
+| 8 | 1,062 | 1,925 | 0.094 | 0.066 | 1.42 | tf has **1.81x** more |
+| 16 | 3,654 | 1,925 | 0.190 | 0.066 | 2.87 | tf has **0.53x** -- *unfair to tf* |
+| 32 | 13,446 | 14,965 | 0.236 | 0.145 | 1.62 | 1.11x |
+| 32 | 13,446 | 14,965 | 0.223 | 0.135 | 1.65 | 1.11x, 3000 steps |
+| 64 | 51,462 | 57,565 | 0.221 | 0.160 | **1.38** | 1.12x, 3000 steps |
+
+The `d = 16` row is not a comparison and is shown only for completeness. The
+last two rows are the honest ones: matched to ~12% and to each other at an
+equal step budget, since `d = 64` at 6000 steps does not fit the compute here.
+
+**On this axis the gap does narrow, 1.65 to 1.38 for a 4x parameter increase.**
+Between those two points the braid layer is flat (0.223 -> 0.221) while the
+transformer gains (0.135 -> 0.160). The braid layer has saturated what 15,000
+braids can teach it -- which the data axis says is a data limit, not a ceiling,
+since it was still climbing at 45,000 -- while the transformer still had room.
+So the narrowing is real and is reported as real; whether it continues, or is
+an artefact of holding data fixed while raising capacity, this sweep cannot
+say.
+
+**The summary the evidence supports:** the prior is *not* a small-data crutch,
+and more data widens rather than closes the gap. More parameters at fixed data
+close some of it. The headline claim stands at the budget it is stated for, and
+extrapolating it to much larger models is not something these numbers license.
+
 ## Train on 3 strands, run on 5
 
 Every other number here is a score on a fixed problem size. This one is a
