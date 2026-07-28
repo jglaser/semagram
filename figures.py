@@ -194,10 +194,10 @@ def fig2(sweep):
     b.append(_text(X(res[0]) + 6, Y(ex[0]) + 20, "no penalty", 11, MUTE))
     b.append(_text(X(res[-1]), Y(ex[-1]) + 24, "hardest enforcement", 11, MUTE,
                    "middle"))
-    b.append(f'<line x1="{x0}" y1="{Y(0.029):.1f}" x2="{x0+pw}" '
-             f'y2="{Y(0.029):.1f}" stroke="{MUTE}" stroke-width="1.6" '
+    b.append(f'<line x1="{x0}" y1="{Y(0.174):.1f}" x2="{x0+pw}" '
+             f'y2="{Y(0.174):.1f}" stroke="{MUTE}" stroke-width="1.6" '
              f'stroke-dasharray="6 4"/>')
-    b.append(_text(x0 + pw, Y(0.029) - 8, "parameter-matched transformer", 11,
+    b.append(_text(x0 + pw, Y(0.174) - 8, "tuned transformer baseline", 11,
                    MUTE, "end"))
     b.append(_text(x0 + 10, Y(0.245), "approximate invariance beats exact",
                    12, INK, "start", "600"))
@@ -227,7 +227,8 @@ def fig3(rows):
                  f'height="{y0-Y(te):.1f}" fill="{col}" opacity="0.35"/>')
         b.append(f'<rect x="{cx+2:.1f}" y="{Y(ex):.1f}" width="24" '
                  f'height="{y0-Y(ex):.1f}" fill="{col}"/>')
-        b.append(_text(cx, y0 + 18, lab, 11, INK, "middle"))
+        for li, part in enumerate(lab.split("\n")):
+            b.append(_text(cx, y0 + 18 + li * 13, part, 11, INK, "middle"))
         b.append(_text(cx + 14, Y(ex) - 6, f"{ex:.3f}", 10, col, "middle", "600"))
     b.append(f'<rect x="{x0+pw-150}" y="{y0-ph-24}" width="12" height="12" '
              f'fill="{MUTE}" opacity="0.35"/>')
@@ -238,15 +239,52 @@ def fig3(rows):
     return _svg(W, H, "".join(b), "In-distribution versus extrapolation")
 
 
+def fig4(chain):
+    """Enforcement -> invariance -> extrapolation, with invariance measured on
+    synthetic Reidemeister-III word pairs that never appear in training."""
+    W, H = 620, 330
+    x0, y0, pw, ph = 110, 250, 400, 170
+    b = [_text(24, 30, "The gain is traceable to invariance, not to the "
+                       "architecture", 16, INK, weight="600"),
+         _text(24, 52, "R-III ratio measured on word pairs that never appear "
+                       "in training  (r = −0.994)", 13, MUTE)]
+    rmin, rmax = 0.48, 0.96
+    emin, emax = 0.10, 0.30
+    X = lambda r: x0 + (rmax - r) / (rmax - rmin) * pw
+    Y = lambda e: y0 - (e - emin) / (emax - emin) * ph
+    xt = [(f"{v:.1f}", X(v)) for v in (0.9, 0.8, 0.7, 0.6, 0.5)]
+    yt = [(f"{v:.2f}", Y(v)) for v in (0.10, 0.15, 0.20, 0.25, 0.30)]
+    b.append(_axes(x0, y0, pw, ph,
+                   "more invariant  →        (Reidemeister-III ratio)",
+                   "extrapolation R²", xt, yt))
+    d = " ".join(f"{'M' if k == 0 else 'L'} {X(r):.1f} {Y(e):.1f}"
+                 for k, (_l, r, e) in enumerate(chain))
+    b.append(f'<path d="{d}" fill="none" stroke="{GOOD}" stroke-width="2.4"/>')
+    for k, (lab, r, e) in enumerate(chain):
+        b.append(f'<circle cx="{X(r):.1f}" cy="{Y(e):.1f}" r="6" fill="{GOOD}"/>')
+        for li, part in enumerate(lab.split("\n")):
+            b.append(_text(X(r), Y(e) - 26 + li * 13, part, 11, INK, "middle"))
+    b.append(f'<line x1="{x0}" y1="{Y(0.174):.1f}" x2="{x0+pw}" '
+             f'y2="{Y(0.174):.1f}" stroke="{MUTE}" stroke-width="1.6" '
+             f'stroke-dasharray="6 4"/>')
+    b.append(_text(x0 + 6, Y(0.174) - 7, "tuned transformer baseline", 11, MUTE))
+    return _svg(W, H, "".join(b), "Invariance versus extrapolation")
+
+
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     SWEEP = [(0, 1.18e-01, 0.141), (0.1, 6.27e-02, 0.153), (1, 1.68e-02, 0.199),
              (3, 7.89e-03, 0.213), (10, 3.35e-03, 0.225), (30, 1.15e-03, 0.208),
              (100, 2.90e-04, 0.190)]
-    ROWS = [("braid", 0.631, 0.128, True), ("braid-ybe", 0.681, 0.186, True),
-            ("tf-abs", 0.643, 0.055, False), ("tf-nope", 0.417, 0.037, False)]
+    ROWS = [("tf-rope", 0.537, 0.174, False), ("braid", 0.631, 0.128, True),
+            ("braid-ybe\nuntied", 0.681, 0.186, True),
+            ("braid-ybe\ntied", 0.760, 0.269, True)]
+    CHAIN = [("braid\nno penalty", 0.912, 0.128),
+             ("untied\nw=10", 0.723, 0.186),
+             ("tied\nw=10", 0.543, 0.267)]
     for name, svg in (("fig1_braids", fig1()), ("fig2_doseresponse", fig2(SWEEP)),
-                      ("fig3_extrapolation", fig3(ROWS))):
+                      ("fig3_extrapolation", fig3(ROWS)),
+                      ("fig4_mechanism", fig4(CHAIN))):
         path = os.path.join(OUT, name + ".svg")
         with open(path, "w") as f:
             f.write(svg)
