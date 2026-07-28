@@ -513,7 +513,7 @@ def run(args):
 # ----------------------------------------------------------------------------
 
 def agg(store, dataset, name, field):
-    v = [m[field] for k, m in store.items()
+    v = [m[field] for k, m in cells(store).items()
          if k.startswith(f"{dataset}|{name}|") and field in m]
     return (float(np.mean(v)), float(np.std(v)), len(v)) if v else (None, 0, 0)
 
@@ -528,7 +528,14 @@ def load_all():
     import glob
     store = {}
     for f in sorted(glob.glob("results*.json")):
-        d = json.load(open(f))
+        try:
+            d = json.load(open(f))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  [skip {f}: {e}]")
+            continue
+        if not isinstance(d, dict):
+            print(f"  [skip {f}: not a results file]")
+            continue
         for k, v in d.items():
             if k == "_refs":
                 store.setdefault("_refs", {}).update(v)
@@ -537,14 +544,38 @@ def load_all():
     return store
 
 
+def cells(store):
+    """Only well-formed `dataset|model|seed` entries count as result cells.
+
+    `load_all` globs `results*.json` from the working directory, so anything
+    else living under that name -- an unrelated tool's output, a half-written
+    shard, a file from an older key layout -- lands in the same dict. Treating
+    every non-underscore key as a dataset name meant one stray key produced a
+    phantom dataset and then a KeyError on its missing reference block.
+    """
+    return {k: v for k, v in store.items()
+            if k != "_refs" and isinstance(v, dict) and k.count("|") == 2}
+
+
 def report(args):
     store = load_all()
-    datasets = sorted({k.split("|")[0] for k in store if not k.startswith("_")})
+    known = cells(store)
+    stray = [k for k in store if k != "_refs" and k not in known]
+    if stray:
+        print(f"  [ignoring {len(stray)} entry/entries that are not "
+              f"dataset|model|seed: {', '.join(sorted(stray)[:4])}"
+              f"{' ...' if len(stray) > 4 else ''}]")
+    datasets = sorted({k.split("|")[0] for k in known})
+    refs = store.get("_refs", {})
     names = ["sema-so2", "sema-su2", "sema-ink", "sema-odd",
              "sema-stat0.03", "sema-stat0.3", "sema-stat3", "sema-so2-open", "sema-su2-open",
              "tf-abs", "tf-ring"]
     for ds in datasets:
-        r = store["_refs"][ds]
+        r = refs.get(ds)
+        if r is None:
+            print(f"\n[{ds}: results present but no reference block -- rerun "
+                  f"`task_shape.py --dataset {ds}` to regenerate it]")
+            continue
         print("\n" + "=" * 78)
         print(f"{ds}  --  occluded-arc completion on real closed contours")
         print("=" * 78)
@@ -567,8 +598,8 @@ def report(args):
             print(f"  {nm:16s} {mu:7.3f} +/-{sd:5.3f} {ac:7.3f} {cl:9.4f} "
                   f"{eq:12.1e} {pa/1e3:7.0f}k  (n={k})")
 
-        gaps = sorted({int(k[3:k.index("_")]) for m in store.values()
-                       if isinstance(m, dict) for k in m
+        gaps = sorted({int(k[3:k.index("_")]) for m in cells(store).values()
+                       for k in m
                        if k.startswith("gap") and k.endswith("_nll")})
         if gaps:
             print(f"\n  completion NLL vs occluded-arc length (of {48})")
