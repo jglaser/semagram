@@ -1,10 +1,19 @@
 """task_perm.py -- does the braided layer's advantage survive without topology?
 
-The knot benchmark shows the braided layer extrapolating 3.4x better than a
-parameter-matched transformer, with the gain tracking Yang-Baxter enforcement.
-That establishes the advantage for one task whose target is a topological
-invariant. The obvious worry is that this is a knot result rather than a
-structural one.
+The knot benchmark shows the braided layer extrapolating better than a tuned
+transformer baseline, with the gain tracking Yang-Baxter enforcement. That
+establishes the advantage for one task whose target is a topological invariant.
+The obvious worry is that this is a knot result rather than a structural one.
+
+NOTE ON THE NUMBERS BELOW. This file was written against the pre-review
+comparison, whose transformer used learned absolute positions and therefore read
+37.5% of its position encoding off untrained rows at extrapolation length. The
+corrected figure is 1.54x against a rotary baseline with the base tuned to the
+sequence length, and the corrected mechanism needs `--tie-r`, without which the
+penalty does not enforce Reidemeister III at all. The control this file runs is
+unaffected -- it compares the braid layer against itself and against a
+transformer on a task where all of them are at or near ceiling -- but the
+framing is from the earlier reading.
 
 This is the cheapest discriminating test. Same layer, same token format, same
 train-short/test-long protocol -- and no topology anywhere. The word is a

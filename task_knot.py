@@ -8,6 +8,14 @@ the circle -- beat every model that was right about it. The proposed reason:
 cyclic shift is too easy a symmetry to matter. A flexible model learns it more
 cheaply than a rigid one imposes it.
 
+Read `--tie-r` before trusting any Yang-Baxter claim here. Untied, each
+generator index gets its own matrix and no two are ever applied at the same
+strand pair, so `ybe_residual` enforces "each map is independently a constant-R
+YBE solution" rather than the braid relation between generators -- two matrices
+that each satisfy YBE to 1.3e-15 have a cross residual of 11.15. Tying is what
+makes the penalty mean Reidemeister III, and `rIII_probe.py` measures the
+difference directly.
+
 Reidemeister equivalence is the opposite kind of symmetry. Deciding whether two
 braid words close to the same knot has no cheap local statistic; the Jones
 polynomial is #P-hard in general. If ANY symmetry is worth building in, it is
@@ -27,8 +35,12 @@ That gives the exact ablation the question needs:
   `braid-ybe`  the same, plus a penalty forcing the learned map to satisfy the
                Yang-Baxter equation, which is precisely the statement that the
                layer is invariant under Reidemeister III
-  `tf`         a parameter-matched transformer over the same token sequence,
-               which must learn all of this from data
+  `tf-rope`    a parameter-matched transformer over the same token sequence,
+               which must learn all of this from data. Rotary positions with
+               the base tuned to the sequence length: `tf-abs` reads 37.5% of
+               its position encoding off untrained rows at extrapolation
+               length, and `tf-nope` drops 0.23 R2 in distribution because a
+               braid word is order-dependent. Neither is a fair comparison.
 
 EXTRAPOLATION IS THE POINT. All three are trained on short braids and tested on
 longer ones. An exactly-invariant model should degrade gracefully in crossing
