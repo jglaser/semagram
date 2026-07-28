@@ -23,6 +23,14 @@ python semagram.py --diagnose         # four structural diagnostics
 python semagram.py --ablate --seeds 3 # leave-one-out over the structural flags
 ```
 
+**[Part II](#part-ii-what-the-layer-is-for)** takes the architecture off text and
+onto data its three commitments are exactly true of -- real closed contours,
+where the origin genuinely is a gauge choice and the loop genuinely must close.
+Short version: two of the commitments were not doing what this file claims, and
+fixing that is worth reading; the layer still loses to a parameter-matched
+transformer, and the transformer that wins is the one that is *wrong* about the
+geometry.
+
 ## Results
 
 `bridge` works, and for the reason the design predicts. `text` went from *worse
@@ -226,3 +234,473 @@ four configurations. Each targets one structural claim and each can refute it.
 - Headline numbers are single-seed; the ablation uses 3 seeds.
 - `n=48`, `d=160`, 20k steps. Everything here is small.
 
+
+
+---
+
+# Part II: what the layer is for
+
+Everything above is a report on a language model that does not work as well as a
+transformer. That result is correct and it is also the wrong question, because
+the three commitments are **priors**, and text satisfies none of them. A
+48-character window of Shakespeare has a first character and a last character
+and they are not neighbours. Imposing a circle on it costs accuracy, and the
+0.171 nats are the bill.
+
+So Part II asks what data the priors are true of, and measures the layer there
+instead. Files: `contours.py` (data), `loop_layer.py` (the layer),
+`task_shape.py` (the benchmark), `figure.py` (pictures).
+
+```bash
+python contours.py                                  # dataset statistics
+python task_shape.py --dataset mnist --seeds 3      # the benchmark
+python task_shape.py --report                       # tables
+python figure.py --out shapes.svg                   # completions, drawn
+```
+
+## The data the priors are literally true of
+
+A closed planar curve, resampled to `n` points of **equal arc length**. Then:
+
+- It **is** a function on `Z_n`. Where you start tracing a closed curve is a
+  gauge choice with no geometric content, so cyclic shift is an exact symmetry
+  of the data. Commitment 1 stops being a modelling convenience and becomes a
+  fact about coastlines.
+- Every edge has the same length, so the whole shape is carried by the
+  **turning angle** at each vertex, which is an element of `SO(2)`. Commitment
+  3's per-edge transport is not a mechanism imposed on the data; it is the
+  data.
+- Going around the loop must return you to yourself, and does so twice over,
+  exactly, for every simple closed curve:
+
+  ```
+  sum_i d_i          = 2*pi      Hopf's Umlaufsatz -- the tangent winds once
+  sum_i exp(i Phi_i) = 0         the curve actually joins up
+  ```
+
+  The first identity **is** the holonomy that `semagram.holonomy` computes and
+  that Part I found "earns nothing measurable". On text there was no such
+  identity for it to earn anything with.
+
+Four real sources, no synthetic shapes. Turning angles are tokenised into 32
+equal-frequency bins, which pins the unigram reference at exactly `log 32 =
+3.466` for every dataset.
+
+| dataset | what it is | contours (train/test) | Markov two-sided infill | closure of truth | after tokenising |
+|---|---|---|---|---|---|
+| `mnist` | handwritten digit outlines | 59994 / 9997 | 3.445 | 0.0041 | 0.0694 |
+| `fashion` | garment silhouettes | 57920 / 9678 | 3.438 | 0.0105 | 0.1073 |
+| `ne_lakes` | Natural Earth lake shorelines | 1242 / 220 | -- | 0.0111 | 0.0756 |
+| `ne_admin1` | Natural Earth admin-1 boundaries | 6217 / 1098 | -- | 0.0085 | 0.0792 |
+
+**The baseline column is the one to argue about, and getting it wrong was the
+easiest mistake available here.** The obvious reference is a next-token bigram
+(3.298 on `mnist`), and it is the wrong one: it scores every position with the
+entire left context observed, which is not this task. The task hides a
+contiguous run of 12 vertices between two observed ones, so the right classical
+answer is the posterior of a first-order chain conditioned on *both* ends,
+
+```
+p(x_k) ~ (P^k)[a, :] * (P^(L+1-k))[:, b]
+```
+
+exact by forward-backward, computed in `markov_infill`. That is 3.445, not
+3.298. The difference matters enormously: against 3.298 the layer looks like it
+fails to use context, and against 3.445 it does not. A 12-vertex hole simply has
+very little pairwise information in it -- the pairwise-optimal two-sided
+predictor beats the unigram by only 0.021 nats -- so the headroom this benchmark
+is fighting over is genuinely narrow, and any claim in it needs the right
+denominator.
+
+Two things in that table matter later. `sum(d)/2pi` is `1.000000` on every
+dataset, so the closure identities hold in the data to the precision they are
+measured at. And **tokenising costs an order of magnitude of closure** --
+0.0041 becomes 0.0694 on `mnist` -- so 0.069 is a floor no model can beat, and
+the constraint experiment has to be read against it rather than against zero.
+
+Anti-aliasing is not optional here and is done identically for every model.
+A coastline is rough at every scale; dropping 48 equally spaced points on one
+without a prefilter aliases that roughness straight into the turning angles.
+Measured before the fix, `|d|` had mean 0.44 rad against a smooth-curve
+expectation of `2*pi/48 = 0.13`, and a first-order Markov table beat the unigram
+by 0.15 nats -- a sampled fractal, on which a benchmark would have measured
+nothing. Curves are therefore low-passed to the Nyquist limit `n/2` as complex
+signals `z = x + iy` before sampling, which is the standard
+elliptic-Fourier-descriptor treatment.
+
+Even after that, the two geographic sets stay close to noise: `ne_admin1` keeps
+24% of its turning-angle power in the top band and has lag-1 autocorrelation
+0.04, against 0.37 in the lowest band and 0.45 for `mnist`. Coastlines are
+fractal, which is a fact about coastlines. The headline runs use `mnist` and
+`fashion`, and that choice is made on measured predictability rather than on
+results.
+
+## Result 1: the layer was not on a circle
+
+This one is structural, it was found by a diagnostic rather than a benchmark,
+and it invalidates a claim in Part I.
+
+`cumulative_phase` trivialises the connection by declaring node 0 to carry the
+identity. If the holonomy `H` is not the identity, that declaration is a
+**branch cut sitting at index 0**: for a pair `(i, j)` straddling it the
+relative transport is conjugated by `H`, and for a pair on the same side it is
+not. Cyclically shifting the loop moves the cut, so the model's output changes
+-- and "there is no index 0" is commitment 1, the headline claim.
+
+Part I already names this branch cut, in `d_reflection`, and treats it as a
+nuisance specific to the reflection diagnostic. It is not specific to it. The
+same cut breaks **translation** equivariance, which is the commitment the whole
+architecture is built around.
+
+Measured in float64 on an untrained model: the relative change in output logits
+under a cyclic shift of the loop is proportional to the holonomy, and vanishes
+to float64 epsilon exactly when the holonomy does.
+
+| gauge | `phi_dev` | shift-equivariance error | holonomy |
+|---|---|---|---|
+| `so2` | 0.00 | **2.7e-15** | 3.6e-15 |
+| `so2` | 0.10 | 2.0e-05 | 1.1e-04 |
+| `so2` | 1.00 | 2.0e-04 | 1.1e-03 |
+| `su2` | 0.00 | **1.7e-15** | 3.9e-08 |
+| `su2` | 0.10 | 1.1e-03 | 1.5e-02 |
+| `su2` | 1.00 | 1.1e-02 | 1.5e-01 |
+
+The reason no amount of care fixes this is topology, not implementation. **A
+connection on a circle is classified up to gauge by exactly one invariant, its
+holonomy**; everything else about it is pure gauge. Equivalently, parallel
+transport is single-valued around the loop if and only if the holonomy is
+trivial. So the two things Semagram wants,
+
+```
+"ambiguity is holonomy"   wants the holonomy NON-trivial
+"there is no index 0"     requires the holonomy trivial
+```
+
+are in direct conflict, and the layer as shipped was quietly paying for
+commitment 3 with commitment 1.
+
+The resolution is to stop making the transport carry both. The holonomy is
+still computed from the edge generators, and is still the loss term and the
+coherence readout it was meant to be; the transport handed to attention is the
+pure-gauge part, `Q_i = B_i G_i` with `B_i` the flat base at integer winding
+and `G_i` a content-dependent rotation, which is exactly periodic and therefore
+exactly equivariant. `gauge_close=False` reproduces the old behaviour.
+
+| model | shift-equivariance | holonomy still measured |
+|---|---|---|
+| `so2`, as shipped | 1.97e-04 | 1.09e-03 |
+| `so2`, closed | **1.28e-15** | 1.09e-03 |
+| `su2`, as shipped | 1.11e-02 | 1.49e-01 |
+| `su2`, closed | **1.30e-15** | 1.49e-01 |
+| transformer, learned absolute positions | 7.7e-01 | -- |
+| transformer, rotary on the ring | 4.2e-15 | -- |
+
+This reframes both holonomy knobs, and Part I's verdict on them is right about
+accuracy and wrong about cost.
+
+`phi_dev` is what *creates* a non-trivial holonomy. Part I measures it as
+neutral -- "0.0 -> 2.472, 1.0 -> 2.462", all within seed noise -- and keeps it
+"at no measured cost". The cost was real and simply never measured: at
+`phi_dev=1.0` the layer is 2e-04 away from equivariant in `so2` and 1e-02 in
+`su2`, against zero at `phi_dev=0`. It was buying nothing with commitment 3 and
+paying for it with commitment 1.
+
+`w_holo` is what *shrinks* the holonomy again, and is therefore the only thing
+that was holding the model near the circle it claims to live on. Part I keeps
+it at 0.2 as a loop-closure penalty for interpretability. It was load-bearing
+for a different reason than the one given.
+
+With the connection split, both knobs become honest: `phi_dev` buys
+content-dependent transport, `w_holo` shapes the coherence readout, and neither
+can spend the equivariance any more.
+
+The last two rows are the honest framing of the equivariance claim. A rotary
+transformer on the ring is *also* exactly equivariant. Circularity has to be
+built in, and there is more than one way to build it in; what Semagram uniquely
+has is Result 3.
+
+
+## Using the layer
+
+The reusable object is `loop_layer.solve`: values on a ring, a mask saying which
+are given, and it returns the stationary state. `extra` is any scalar function
+of that state, added to the action at solve time.
+
+```python
+import dataclasses, jax.numpy as jnp, loop_layer as L
+
+cfg = L.LoopCfg(n=48, d=64, vocab=32, gauge="su2")   # so2 | su2 | none
+p   = L.init(key, cfg)
+
+x = L.solve(p, values, clamp, cfg)                   # (batch, n, d)
+
+def must_close(x):                                   # a constraint as energy
+    d   = jax.nn.softmax(L.logits_of(p, x, cfg), -1) @ centres
+    phi = jnp.cumsum(d, -1) - d[..., :1]
+    return 0.3 * jnp.sum(jnp.cos(phi).sum(-1)**2 + jnp.sin(phi).sum(-1)**2)
+
+x = L.solve(p, values, clamp, cfg, extra=must_close)  # no retraining
+```
+
+Read Result 4 before relying on that last line. Keep `k_steps` at its trained
+value and the constraint weight below ~1; outside that band the solve diverges,
+and the reason is architectural rather than a tuning failure.
+
+Two properties are worth knowing:
+
+- **The origin is free.** With `gauge_close=True` the layer is equivariant to
+  cyclic shift to machine precision, so nothing has to decide where the loop
+  starts. Measured here, that is worth nothing in accuracy -- a transformer with
+  absolute positions beat it -- so reach for this when you need the invariance
+  itself, not when you want a better score.
+- **It is not a converged fixed point.** `SOLVER STATUS` in Part I still
+  applies, and Result 4 quantifies it: four extra sweeps cost 0.385 nats.
+
+## Result 2: non-abelian holonomy, and what it does not buy
+
+`semagram.py` transports by `SO(2)^(d/2)`. Those commute, so the holonomy of a
+loop is the **sum** of the edge phases and nothing else: two loops carrying the
+same multiset of phases in different orders are indistinguishable to it. For an
+architecture whose claim is that going around the loop *in order* is what
+produces meaning, an order-blind holonomy is a strange thing to have.
+
+`gauge="su2"` transports by `SU(2)^(d/4)` -- unit quaternions acting on
+`R^4 = C^2` by left multiplication -- composed as a **path-ordered** product via
+`lax.associative_scan`, so it stays `O(n log n)`, the same budget the circulant
+attention is justified by. Left multiplication by a unit quaternion is
+orthogonal, so attention logits still depend only on the relative transport
+between two positions, which is the property RoPE is built on; what no longer
+holds is that the relative transport depends only on `i - j`. `SO(2)` is
+recovered exactly when every edge turns about one axis, so `gauge` is a clean
+ablation rather than a different model.
+
+The machinery is correct to machine precision -- associativity 1.8e-15, unit
+norm 1.1e-16, orthogonality of the action on `R^4` 4.4e-16, the scan against a
+naive loop 2.2e-16 -- and it has the property it was built for: permuting the
+edges of a loop leaves the abelian holonomy **exactly** unchanged by
+construction, and moves the `su2` holonomy by 1.09 radians.
+
+The prediction was that this should matter *here*, because a closed curve's
+edges compose to the identity in `SE(2)`, which is not abelian; the part of that
+condition which is a plain sum, `sum d_i = 2*pi`, is all an abelian holonomy can
+express, and the part that says the curve joins up is exactly the part that does
+not commute.
+
+**The prediction is refuted.** On `mnist` at three seeds, `su2` scores
+3.388 +/- 0.017 against `so2` at 3.397 +/- 0.013 -- inside seed noise -- and on
+`fashion` the order reverses (3.455 against 3.448). Closure is no better either
+(0.2274 against 0.2258). The non-abelian gauge earns nothing measurable on this
+task, which is the same verdict Part I reached for the abelian one, now reached
+for the more expressive version on data that actually has the structure.
+
+One `su2`-specific bug is worth recording because it would silently sink any
+reimplementation: the holonomy angle was `2*arccos|Re H|`, whose derivative is
+infinite at the identity -- which is exactly where an initialised model sits --
+so `su2` produced `nan` on the first optimiser step. `2*atan2(|Im|, |Re|)` is
+the same angle and is smooth there.
+
+## Result 3: the benchmark, and it is a loss
+
+Occluded-arc completion, 12 of 48 vertices hidden at a uniformly random
+position, identical evaluation masks for every model, parameter-matched. `mnist`
+at three seeds, `fashion` at one. `n=48`, `d=64`, `vocab=32`, 3000 steps.
+
+**mnist**
+
+| model | NLL | acc | closure | shift-equivariance | params |
+|---|---|---|---|---|---|
+| unigram | 3.466 | -- | -- | -- | -- |
+| Markov two-sided infill | 3.445 | -- | -- | -- | -- |
+| `sema-so2` | 3.397 +/- 0.013 | 0.057 | 0.2258 | **5.4e-07** | 32k |
+| `sema-su2` | 3.388 +/- 0.017 | 0.059 | 0.2274 | **5.6e-07** | 32k |
+| **`tf-abs`** | **3.167 +/- 0.008** | 0.092 | 0.2071 | 7.1e-01 | 29k |
+| `tf-ring` | 3.186 +/- 0.011 | 0.091 | **0.1942** | **2.8e-07** | 27k |
+
+**fashion** (single seed)
+
+| model | NLL | closure |
+|---|---|---|
+| Markov two-sided infill | 3.438 | -- |
+| `sema-so2` | 3.448 | 0.2514 |
+| `sema-su2` | 3.455 | 0.2563 |
+| **`tf-abs`** | **3.264** | 0.2478 |
+| `tf-ring` | 3.342 | 0.2380 |
+
+Three things, in descending order of how much they should change your mind.
+
+**The layer loses, on the data its priors are exactly true of.** 0.23 nats
+behind on `mnist`, 0.18 behind on `fashion`, at matched parameters, matched
+steps, matched masks. This is the same verdict as Part I's Shakespeare result,
+reached after removing the excuse that Part I offered for it. The priors being
+true of the data was the hypothesis; it is not sufficient.
+
+**Being right about the symmetry buys nothing.** `tf-abs` has learned absolute
+position embeddings, which are meaningless on a closed curve -- its output
+changes by 71% under a cyclic shift of an input whose shift is physically
+meaningless. It still **beats** `tf-ring`, which is exactly equivariant
+(2.8e-07), on both datasets. So on this task the correct symmetry is not worth
+having, and the model that is provably wrong about the geometry wins anyway.
+That is the most uncomfortable number here and it is not one the architecture
+can be defended against: it says the symmetry argument, which is the entire
+motivation for commitment 1, does not cash out.
+
+**The closure story inverts.** `tf-ring` produces the curves that close best
+(0.1942), better than either Semagram variant (0.2258, 0.2274), despite having
+no holonomy, no closure penalty, and no notion that a curve should close. The
+architecture built around loop closure is worse at loop closure than a
+transformer that has never heard of it.
+
+The one place the boundary-value framing does show up is in how the models
+degrade as the hole grows:
+
+| occluded arc (of 48) | 6 | 12 | 18 | 24 |
+|---|---|---|---|---|
+| `sema-so2` | 3.364 | 3.397 | 3.416 | 3.458 |
+| `tf-abs` | 3.123 | 3.167 | 3.222 | 3.270 |
+| `tf-ring` | 3.136 | 3.186 | 3.257 | 3.352 |
+| gap to `tf-ring` | 0.228 | 0.211 | 0.159 | **0.106** |
+
+Semagram degrades most slowly of the three -- 0.094 nats from a 6-vertex hole to
+a 24-vertex one, against 0.147 for `tf-abs` and 0.216 for `tf-ring` -- so its
+deficit more than halves as the problem becomes genuinely two-sided. On
+`fashion` the same trend appears (gap to `tf-ring` 0.145 -> 0.077). It is a real
+trend in the direction the architecture predicts, and it is not close to
+overturning the ranking at any hole size tested. Reported because extrapolating
+it would be exactly the kind of thing this repo exists not to do.
+
+## Result 4: constraints after training -- why the energy framing does not cash out
+
+This is the capability the energy formulation is *for*, and the one thing no
+transformer can imitate. The forward pass is `argmin_X S[X]`, so a constraint
+discovered after training should be one more term in `S`, solved by the same
+sweeps, nothing retrained. A closed curve supplies the ideal test case: a
+constraint that is global, exact, and impossible for a token-wise decoder to
+enforce, `sum_i exp(i Phi_i) = 0`.
+
+It does not work. The effect is real but tiny where it exists, and the reason it
+cannot be pushed further is structural.
+
+**At the trained operating point it does the right thing, weakly.** `eta=0.8`,
+`K=8`, `mnist`, `sema-so2` seed 0. The energy term *is* the soft closure, so
+that is the quantity it should reduce:
+
+| `w` | NLL | soft closure | argmax closure |
+|---|---|---|---|
+| 0 | 3.385 | 0.1754 | 0.2207 |
+| 0.1 | 3.384 | 0.1733 | 0.2251 |
+| **0.3** | **3.385** | **0.1697** | 0.2246 |
+| 1 | 3.390 | 0.1722 | 0.2304 |
+| 3 | 3.458 | 0.2304 | 0.2535 |
+
+At `w=0.3` the constraint reduces what it penalises by 3.2% for 0.000 nats.
+Above `w~1` the solve diverges.
+
+**The gain never reaches the drawn shape.** The argmax closure moves the wrong
+way throughout. The constraint shifts the *mean* of a 32-way categorical, and a
+small shift in a mean does not move a mode, so the polygon actually drawn is no
+better. That is a tokenisation problem and the clearest argument for a
+continuous-valued head.
+
+**And there is no room to push, because the forward pass is not a solve.** The
+obvious response -- run the solver longer -- is unavailable. With *no constraint
+at all*, changing only the sweep schedule of an already-trained model:
+
+| `eta` | `K` | NLL | argmax closure |
+|---|---|---|---|
+| 0.8 | **8** (as trained) | **3.385** | 0.2207 |
+| 0.8 | 12 | 3.770 | 0.2719 |
+| 0.8 | 16 | 5.076 | 0.2753 |
+| 0.8 | 32 | 6.700 | 0.2657 |
+| 0.1 | 100 | 4.295 | 0.2997 |
+
+Four extra sweeps cost 0.385 nats. Twenty-four cost 3.3. The state is only
+meaningful at exactly the `K` it was trained at, because -- as `SOLVER STATUS`
+says -- `-logsumexp` of a quadratic form supplies genuine negative curvature,
+the iteration matrix has spectral radius above 1, and the unroll *diverges* if
+allowed to run. Part I measured that spectral radius. This table is what it
+costs, and it is the reason the constraint story fails: adding a term to `S`
+changes what the sweeps descend on, and absorbing that change needs solver
+budget the architecture does not have.
+
+Hence one-shot at a useful weight is a kick and not a descent (`w=30` sends NLL
+3.385 -> 11.7 and makes closure *worse*), continuation does not rescue it, and
+lowering `eta` to buy stability costs more than the constraint gains because the
+`w=0` control has already fallen apart. The table printed by
+`task_shape.py --report` uses a deliberately over-large sweep budget and shows
+the failure at full size (NLL 3.4 -> 15.5).
+
+**"Compose constraints at inference" is a property of energy-based layers in
+general and not of this one, and the blocker is the same negative curvature that
+stops the solve converging.** Two things would change it: a continuous output
+head, so the constraint acts on geometry rather than on a categorical's mean;
+and an energy whose stationary point is actually reachable, which the
+`-logsumexp` attention term rules out by construction.
+
+## What was tried and did not work
+
+Same convention as Part I: each was a plausible mechanism, measured, and either
+dropped or replaced.
+
+| hypothesis | measured |
+|---|---|
+| the priors being true of the data is enough to win | 0.23 nats behind a parameter-matched transformer on `mnist` |
+| exact circular equivariance helps on circular data | `tf-abs` (equivariance 0.71) beats `tf-ring` (2.8e-07) on both datasets |
+| non-abelian holonomy captures the `SE(2)` closure an abelian one cannot | `su2` 3.388 +/- 0.017 vs `so2` 3.397 +/- 0.013 -- inside noise, and reversed on `fashion` |
+| a closure-aware architecture draws curves that close | `tf-ring` closes best (0.1942) with no closure machinery at all |
+| add the whole constraint at one large weight | a kick, not a descent: NLL 3.4 -> 11.7, closure worse |
+| continuation rescues the constraint | it does not; same failure, NLL 11.7 |
+| run the solver longer to make room for the constraint | +4 sweeps costs 0.385 nats with no constraint present |
+| sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
+| close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
+| `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
+| `windings` as float32 | 1e-5 rad of base-angle error, two orders above float32 epsilon on the equivariance |
+| next-token bigram as the baseline | wrong task; the right one is two-sided Markov infill, 3.445 not 3.298 |
+
+## Honest limits
+
+- **Small, and short.** `n=48`, `d=64`, `vocab=32`, 3000 steps, CPU. Semagram
+  starts at NLL 12.6 because of the peaked tied readout while the transformers
+  start at 3.47, and it is still descending at 3000 steps. A longer horizon
+  would narrow the gap by an unknown amount; it would have to narrow it by 0.23
+  nats to change the conclusion.
+- **`fashion` is a single seed** and `ne_lakes` / `ne_admin1` were not run at
+  all, because they are near-noise at `n=48` (24% of turning power in the top
+  band, lag-1 autocorrelation 0.04). That is a property of coastlines.
+- **Tokenising dominates the closure metric.** The floor is 0.069 on `mnist`
+  against 0.004 for the underlying curves. Every closure number here is mostly
+  quantisation, which is why the constraint experiment has so little room.
+- **The equivariance result is not unique to this layer.** A ring-rotary
+  transformer is exactly equivariant too, and is in the table for that reason.
+- **The solver is still not a solver**, and Result 4 is what that costs.
+
+## Verdict
+
+The question was whether this is a genuinely useful layer, proved on real task
+data. On this evidence: **not yet, and the reasons are specific rather than
+vague.**
+
+What survives is real and exact:
+
+- a structural bug and its fix -- the layer was not on a circle, because a
+  non-trivial holonomy puts a branch cut at index 0, and the shift-equivariance
+  error is exactly proportional to the holonomy. `phi_dev` was spending
+  commitment 1 to buy nothing; `w_holo` was the only thing paying it back. Split
+  the connection and equivariance is exact at 1.3e-15 with the holonomy
+  preserved as a readout;
+- a working non-abelian gauge at `O(n log n)`, verified to 1e-15, which detects
+  loop orderings the abelian one is provably blind to;
+- a precise account of why test-time constraint composition -- the whole point
+  of an energy-based forward pass -- is not available on an unroll whose
+  iteration matrix has spectral radius above 1.
+
+What does not survive is the motivating claim. Every distinctive property was
+verified exactly and none of them converted into accuracy, on data chosen
+specifically because the priors are true of it. The most direct statement of the
+result is that `tf-abs`, which is provably wrong about the geometry, beat every
+model here that is provably right about it.
+
+The two changes most likely to move this are a continuous-valued output head
+(which would make both the closure metric and the constraint mechanism
+meaningful) and an energy without negative curvature (which would make the
+forward pass a solve, and the constraint story available). Neither is a
+hyperparameter.
