@@ -626,9 +626,15 @@ def _rope(x, n):
     return jnp.stack([a * c - b * s, a * s + b * c], -1).reshape(x.shape)
 
 
-def tf_forward(p, tokens, clamp, heads, ring):
-    b, n = tokens.shape
-    e = p["emb"][tokens]
+def tf_forward(p, tokens, clamp, heads, ring, cont=False):
+    """`cont`: `tokens` is already a real-valued feature array (b, n, f) rather
+    than integer ids, projected in by p["inp"]. Same trunk either way."""
+    if cont:
+        b, n = tokens.shape[:2]
+        e = tokens @ p["inp"]
+    else:
+        b, n = tokens.shape
+        e = p["emb"][tokens]
     h = jnp.where(clamp[..., None] > 0, e, p["mask"])
     if not ring:
         h = h + p["pos"][:n]
