@@ -196,13 +196,14 @@ Trained on 3-strand braids only, `--knots-only` throughout:
 
 | model | 3 strands | 4 strands | 5 strands |
 |---|---|---|---|
-| **tied** | 0.952 | **0.553** | **0.363** |
-| untied | 0.968 | 0.261 | 0.146 |
+| **tied** | 0.955 +/- 0.002 | **0.563 +/- 0.007** | **0.376 +/- 0.012** |
+| untied | 0.968 +/- 0.000 | 0.256 +/- 0.008 | 0.135 +/- 0.009 |
 
-The tied layer keeps **38% of its in-distribution R2 at 5 strands**, and beats
-the untied control 2.1x at 4 and 2.5x at 5 -- while being slightly *worse* in
-distribution (0.952 against 0.968), so this is not a capacity effect. Untied
-degrades as the algebra requires: `R[sigma_3]` never receives a gradient.
+Three seeds each. The tied layer keeps **39% of its in-distribution R2 at 5
+strands**, and beats the untied control **2.20x at 4 strands and 2.78x at 5** --
+while being *worse* in distribution (0.955 against 0.968), which rules out
+capacity as the explanation. Untied degrades as the algebra requires:
+`R[sigma_3]` never receives a gradient.
 
 **A transformer cannot be run in this column at all.** Its input is a token per
 generator, so a 5-strand word contains symbols whose embedding rows do not exist
@@ -229,10 +230,13 @@ provides neither. Measured, against the tied `d = 32` baseline at 0.267:
 | | extrapolation R2 | delta |
 |---|---|---|
 | tied baseline | 0.267 +/- 0.000 (n=2) | -- |
-| + Reidemeister II (`w_inv = 1`) | 0.276 | +0.009 |
+| + Reidemeister II (`w_inv = 1`) | 0.268 +/- 0.008 (n=3) | **+0.001** |
 | + conjugation (`w_conj = 1`) | 0.252 | -0.015 |
 | + conjugation (`w_conj = 10`) | 0.210 | **-0.057** |
 | + both | 0.196 | -0.071 |
+
+Reidemeister II is **nothing**: +0.001 over three seeds. A single seed had shown
++0.009 and that was noise.
 
 **Conjugation hurts, and worse the harder it is pushed.** The reason is
 structural rather than a tuning failure: mean pooling has no cyclic property, so
@@ -241,10 +245,41 @@ reduce `||f(a b a^-1) - f(b)||` is to become insensitive to the added letters --
 that is, more constant. **A penalty cannot install a property the architecture
 forbids; it can only buy it with capacity.**
 
-So the fix is not a weight. The readout has to become genuinely trace-like, and
-until it does, the conjugation half of Markov's theorem is unavailable no matter
-what it is charged. Reidemeister II's +0.009 on one seed is not a result either
-way.
+So the fix is not a weight -- the readout has to become genuinely trace-like.
+`trace_layer.py` does exactly that, and it settles the question in the other
+direction.
+
+**Conjugation invariance, installed rather than charged for.** Accumulate a
+matrix along the word instead of a vector, `M <- G(i, sign) @ M` from `M_0 = I`,
+and read out class functions: `tr(M)`, `tr(M^2)`, `log|det M|`. Then
+`tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two conditions make it
+exact and both were missing before: `G(i, -1)` must invert `G(i, +1)`, which is
+Reidemeister II and is here **computed rather than penalised**; and `G` must act
+where the letter names while being the same map everywhere, which is what tying
+achieved. This is the shape of the reduced Burau representation with a learned
+block.
+
+| model | test R2 | extrapolation R2 | conjugation error |
+|---|---|---|---|
+| tanh + mean-pool (tied) | **0.730** | **0.267** | 1.86e-01 |
+| trace readout, `k = 3` | 0.259 | 0.004 | **3.7e-07** |
+| trace readout, `k = 6` | 0.284 | **-1.428** | **6.5e-07** |
+
+The mean-pool model's conjugation error is **98.5% of its own output scale** --
+not imperfectly invariant, maximally non-invariant. The trace readout is
+**2.7e+06 times** more invariant, exactly and by construction, and it costs
+almost all the task performance. At `k = 6` extrapolation is worse than
+predicting the mean, which is the numerical fragility of long matrix products.
+
+**So conjugation is not a useful symmetry for this target**, and both routes
+agree -- the penalty and the construction. The Jones polynomial of a closure
+genuinely *is* conjugation invariant, so imposing it "should" help; but a target
+being invariant does not make the best *estimator* invariant. Restricting to the
+invariant function class is a real capacity cost, and against a four-dimensional
+class-function bottleneck the cost dwarfs the benefit.
+
+That is the same shape as the Yang-Baxter turnover, now measured on a second
+symmetry by a second method: **exactness costs capacity.**
 
 ## Getting the baseline right
 
