@@ -93,6 +93,9 @@ class LoopCfg:
     norm_eps: float = 1e-6
     w_holo: float = 0.2
     vocab: int = 32
+    odd_conv: bool = False    # add the antisymmetric circulant that a scalar
+                              # action provably CANNOT produce. Breaks
+                              # conservativity on purpose. See odd_apply.
     gauge: str = "so2"        # "so2" (abelian, as shipped) | "su2" | "none"
     gauge_close: bool = True  # renormalise the connection so the loop holonomy
                               # is exactly trivial. False reproduces
@@ -185,6 +188,54 @@ def qprefix(q):
     return jnp.concatenate([ident, inc[:, :-1]], axis=1), inc[:, -1]
 
 
+def odd_multiplier(p, cfg):
+    """Purely imaginary symbol -> real ANTISYMMETRIC circulant -> directed kernel.
+
+    A real circulant operator is symmetric iff its symbol is real and
+    antisymmetric iff its symbol is purely imaginary (with the DC bin, and the
+    Nyquist bin for even n, set to zero so the operator stays real). So this is
+    exactly the component of a convolution that a scalar action cannot express.
+    """
+    a = jnp.pad(p["g_odd"], ((0, cfg.n // 2 + 1 - (cfg.modes + 1)), (0, 0)))
+    a = a.at[0].set(0.0)
+    if cfg.n % 2 == 0:
+        a = a.at[-1].set(0.0)
+    return 1j * a
+
+
+def odd_apply(x, p, cfg):
+    """The term the energy framing forbids, added straight to the vector field.
+
+    The argument against conservativity is a two-line proof and it is correct:
+    a quadratic form only ever sees the symmetric part of its operator,
+
+        S = 0.5 x^T A x   =>   grad S = 0.5 (A + A^T) x,
+
+    and for a real circulant A the transpose conjugates the symbol, so the
+    symmetrised multiplier is Re g(m) -- real symbol, even kernel,
+    reflection-symmetric. Verified numerically to 2e-16, and for a generic
+    kernel the discarded odd part is 65% of its norm. A scalar action CANNOT
+    produce a directed convolution.
+
+    So this function adds one to the update directly, bypassing `jax.grad`. The
+    layer is then no longer a gradient field -- the Jacobian picks up an
+    antisymmetric piece -- which is the whole point: it measures what
+    conservativity costs on this task rather than arguing about it.
+
+    What the argument does NOT establish is that the layer as a whole cannot be
+    directed. Direction enters Semagram through the flat connection, not through
+    the convolution: the gauge rotates q and k by the cumulative edge phase, and
+    per 2-plane W^T R(dth) W = cos(dth) W^T W + sin(dth) W^T J W, whose second
+    term is antisymmetric and odd in dth. That survives inside a scalar action
+    because the attention term is a log-sum-exp of gauge-rotated inner products,
+    not a quadratic form. Part I's ablation is the evidence: turning the flat
+    base off costs +0.466 nats and drops the measured reflection residual to
+    1.6e-04, i.e. provably blind.
+    """
+    return jnp.fft.irfft(jnp.fft.rfft(x, axis=1) * odd_multiplier(p, cfg)[None],
+                         n=cfg.n, axis=1)
+
+
 def qapply(Q, v):
     """Left-multiply the 4-blocks of v (b, n, d) by the transports Q."""
     b, n, d = v.shape
@@ -211,6 +262,7 @@ def init(key, cfg):
         "bh": jnp.zeros((4 * cfg.d,)),
         "alpha": jnp.array(0.5),
         "prior": jax.random.normal(k[6], (cfg.d,)),
+        **({"g_odd": jnp.zeros((cfg.modes + 1, cfg.d))} if cfg.odd_conv else {}),
     }
 
 
@@ -413,7 +465,10 @@ def solve(p, c, clamp, cfg, extra=None, x0=None, trace=False):
                       argnums=1)
 
     def sweep(x, _):
-        gr = S.circulant(grad_x(p, x, c, clamp), inv_geo, cfg.n) / jac
+        field = grad_x(p, x, c, clamp)
+        if cfg.odd_conv:
+            field = field + odd_apply(x, p, cfg)   # non-conservative on purpose
+        gr = S.circulant(field, inv_geo, cfg.n) / jac
         x = x - cfg.eta * gr
         if cfg.hard_clamp:
             x = keep * c + free * x
