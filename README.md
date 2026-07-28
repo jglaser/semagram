@@ -517,6 +517,22 @@ python task_shape.py --report                       # tables
 python figure.py --out shapes.svg                   # completions, drawn
 ```
 
+### Model names in the tables
+
+| name | what it is |
+|---|---|
+| `sema-so2` | the layer as shipped: abelian `SO(2)` gauge |
+| `sema-su2` | non-abelian `SU(2)` gauge, path-ordered (Result 2) |
+| `sema-ink` | + content-dependent local stiffness (Result 10) |
+| `sema-odd` | + the directed convolution a scalar action forbids (Result 6) |
+| `sema-stat<w>` | + stationarity penalty at weight `w` (Result 8) |
+| `tf-abs` | **transformer**, learned **abs**olute positions -- what people reach for, and mis-specified on a closed curve |
+| `tf-ring` | **transformer**, rotary positions quantised to the **ring** -- exactly shift-equivariant, the fair baseline |
+
+Both transformers are parameter-matched to Semagram (27-29k against 32k) and
+trained on the same objective, masks and data. `tf` is short for transformer
+throughout.
+
 ## Running Part II
 
 Everything is CPU-only and single-file; no GPU is needed and none was used.
