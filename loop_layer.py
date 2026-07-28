@@ -93,6 +93,10 @@ class LoopCfg:
     norm_eps: float = 1e-6
     w_holo: float = 0.2
     vocab: int = 32
+    aniso: bool = False       # content-dependent local stiffness: the "ink
+                              # density" term. Inhomogeneous around the loop
+                              # while remaining exactly origin-free. See
+                              # s_aniso.
     w_stat: float = 0.0       # penalise ||grad_x S|| at the unroll's output, so
                               # that what the network computes is forced to be
                               # what the energy wants. See loss_fn.
@@ -266,6 +270,8 @@ def init(key, cfg):
         "alpha": jnp.array(0.5),
         "prior": jax.random.normal(k[6], (cfg.d,)),
         **({"g_odd": jnp.zeros((cfg.modes + 1, cfg.d))} if cfg.odd_conv else {}),
+        **({"w_ink": jax.random.normal(k[7], (cfg.d, 1)) * s * 0.1,
+            "b_ink": jnp.zeros((1,))} if cfg.aniso else {}),
     }
 
 
@@ -444,9 +450,45 @@ def s_rest(p, x, cfg):
     return s_att + s_hop
 
 
+def s_aniso(p, x, cfg):
+    """Weighted Dirichlet energy with a CONTENT-dependent weight per position.
+
+        S_aniso = 0.5 * sum_i a(x_i) * ||x_{i+1} - x_i||^2
+
+    This is the "ink density" term, and it exists because of a measurement. Error
+    stratified by local curvature shows the layer trailing a transformer by 0.11
+    nats at flat vertices and 0.42 at sharp ones -- essentially the whole deficit
+    sits where the curve turns hard. The circulant prior is the suspect: it
+    depends only on angular difference, so it asserts every point of the loop is
+    interchangeable and applies one global smoothness everywhere. A digit outline
+    is smooth arcs punctuated by corners, and a logogram is thick here and thin
+    there; neither is homogeneous.
+
+    The fix cannot index the variation by position, because the loop still has no
+    origin and Result 1 was about exactly that. It has to be intrinsic. Here
+    `a = softplus(w . rmsnorm(x_i) + b)` is a function of the CONTENT at a
+    vertex, so it shifts with the loop and the layer stays exactly
+    shift-equivariant while the prior stops being homogeneous. Small `a` at a
+    corner lets the state turn sharply; large `a` along a smooth arc keeps the
+    smoothing.
+
+    This is Perona-Malik anisotropic diffusion written as an action, and it costs
+    the quadratic structure: with `a` depending on `x` the term is no longer a
+    quadratic form, so `jax.grad` picks up the `da/dx` piece. It remains a
+    perfectly good scalar action -- conservativity is untouched -- and the
+    circulant term is kept alongside it so the Fourier preconditioner in `solve`
+    is still exact for the part it was built for.
+    """
+    a = jax.nn.softplus(S.rmsnorm(x, cfg.norm_eps) @ p["w_ink"] + p["b_ink"])
+    dx = jnp.roll(x, -1, axis=1) - x
+    return 0.5 * jnp.sum(a * dx ** 2)
+
+
 def action(p, x, c, clamp, cfg, extra=None):
     dat = 0.5 * cfg.lam * jnp.sum(clamp[..., None] * (x - c) ** 2)
     tot = S.s_quad(p, x, cfg) + dat + s_rest(p, x, cfg)
+    if cfg.aniso:
+        tot = tot + s_aniso(p, x, cfg)
     return tot if extra is None else tot + extra(x)
 
 

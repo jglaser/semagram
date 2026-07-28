@@ -247,7 +247,7 @@ def run(a):
     dtr, ltr = jnp.asarray(dtr), jnp.asarray(ltr)
     mask = T.eval_masks(dte.shape[0], a.n, a.gap)
     cfg = L.LoopCfg(n=a.n, d=a.d, heads=4, k_steps=a.k, modes=12, vocab=4,
-                    phi_dev=0.5, w_stat=a.w_stat)
+                    phi_dev=0.5, w_stat=a.w_stat, aniso=a.aniso)
     print(f"continuous edge-vector task | train {dtr.shape[0]} test {dte.shape[0]}"
           f" | log-length CV {float(jnp.std(ltr)):.3f}")
     print(f"closure of the TRUE curves: {float(jnp.mean(closure_cont(dte, lte))):.5f}"
@@ -274,8 +274,8 @@ def run(a):
                   f"{time.time()-t0:5.0f}s", flush=True)
     os.makedirs("ckpt", exist_ok=True)
     import pickle
-    pickle.dump(jax.tree.map(np.asarray, p),
-                open(f"ckpt/{a.dataset}_cont_s{a.seed}.pkl", "wb"))
+    tag = f"{a.dataset}_cont{'ink' if a.aniso else ''}_{a.repr}_s{a.seed}"
+    pickle.dump(jax.tree.map(np.asarray, p), open(f"ckpt/{tag}.pkl", "wb"))
 
     x = solve_cont(p, dte, lte, mask, cfg)
     dd, ll = decode(p, x, cfg, dte, lte, mask)
@@ -290,6 +290,14 @@ def run(a):
           f"bins): {bnll:.4f}")
     print(f"  references: unigram 3.466 | Markov two-sided infill 3.445 | "
           f"sema-so2 3.397 | tf-abs 3.167")
+    per = cont_nll(p, x, cfg, dte, lte)
+    tv = np.abs(np.asarray(dte)); q = np.quantile(tv, [0.2,0.4,0.6,0.8])
+    b = np.digitize(tv, q); fr = np.asarray(free); pe = np.asarray(per)
+    qs = [pe[(b==k)&(fr>0)].mean() for k in range(5)]
+    print("CONTINUOUS NLL BY |turning| QUINTILE (the ink prediction: Q5 should "
+          "improve, Q1 should not)")
+    print("   " + "".join(f"{'Q'+str(i+1):>9s}" for i in range(5)) + f"{'Q5-Q1':>9s}")
+    print("   " + "".join(f"{v:9.3f}" for v in qs) + f"{qs[-1]-qs[0]:+9.3f}")
     print(f"\n{'w':>8s} {'cont-NLL':>10s} {'closure':>9s}   {'closure (angles locked)':>24s}")
     for w in a.con_w:
         out = []
@@ -317,6 +325,8 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--eval-n", type=int, default=512)
     ap.add_argument("--w-stat", type=float, default=0.0)
+    ap.add_argument("--aniso", action="store_true",
+                    help="content-dependent local stiffness (the ink term)")
     ap.add_argument("--repr", default="param", choices=["param", "arc"],
                     help="param: uniform-parameter, angle+length (adds the "
                          "stroke channel). arc: equal arc length, angle only "

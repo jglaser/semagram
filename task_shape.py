@@ -416,6 +416,7 @@ def run(args):
     for seed in (args.seed_list or list(range(args.seeds))):
         for name, over in [("sema-so2", dict(gauge="so2")),
                            ("sema-su2", dict(gauge="su2")),
+                           ("sema-ink", dict(gauge="so2", aniso=True)),
                            ("sema-odd", dict(gauge="so2", odd_conv=True)),
                            ("sema-stat0.03", dict(gauge="so2", w_stat=0.03)),
                            ("sema-stat0.3", dict(gauge="so2", w_stat=0.3)),
@@ -539,7 +540,7 @@ def load_all():
 def report(args):
     store = load_all()
     datasets = sorted({k.split("|")[0] for k in store if not k.startswith("_")})
-    names = ["sema-so2", "sema-su2", "sema-odd",
+    names = ["sema-so2", "sema-su2", "sema-ink", "sema-odd",
              "sema-stat0.03", "sema-stat0.3", "sema-stat3", "sema-so2-open", "sema-su2-open",
              "tf-abs", "tf-ring"]
     for ds in datasets:
