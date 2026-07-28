@@ -1,188 +1,228 @@
-# Cyclic fibers vs. weight tying on modular arithmetic
+# Semagram: circular attention as a boundary-value problem
 
-A small factorial experiment in raw JAX testing two claims from a design
-conversation about boundary-value ("Fermat-style") sequence models:
+`semagram.py` is a single-file JAX demo of an attention architecture with three
+commitments, taken from the logograms in *Arrival*:
 
-1. **factorization** — does two-sided conditioning beat a committed
-   autoregressive ordering when evidence sits at both ends?
-2. **fiber** — does a *closed* (cyclic) token-embedding space beat free or tied
-   embeddings?
+1. **Tokens live on a circle.** No BOS, no EOS, no position 0. Attention that
+   depends only on angular difference is circulant, hence diagonal in the DFT
+   basis and applied in `O(n log n)` by `rfft`. A real spectral multiplier is an
+   even kernel, so reflection symmetry of the geometric prior is exact by
+   construction rather than learned.
+2. **The forward pass is a stationary point, not a stack.** An action `S[X]` is
+   defined over the whole loop and the layer solves `dS/dX = 0`, so attention is
+   literally `jax.grad(energy)`, the Jacobian is symmetric, and there is no
+   separate `V` matrix — value mixing falls out of differentiating log-sum-exp.
+3. **Ambiguity is holonomy.** Each edge carries an `SO(2)` transport per
+   2-plane; going once around the loop should return you to yourself, and the
+   closure residual measures how far a reading is from globally coherent.
 
-The headline: claim 2 has a real, narrow, mechanistic effect. Claim 1 is
-**not established** by this code, and a third claim (an energy-based halting
-certificate) is **refuted**.
-
----
-
-## Task
-
-`x_i = (x_0 + i·s) mod p`, for `i = 0..L-1`, with `p = 97`, `L = 8`.
-All `p² = 9409` sequences enumerated; 40% train, 60% held out.
-
-Chosen because it is maximally favourable and I want that on the record:
-
-- The interior is genuinely a two-point boundary value problem. Given `x_0` and
-  `x_{L-1}`, the step is `s = (x_{L-1} − x_0) · (L−1)⁻¹ mod p`, unique whenever
-  `gcd(L−1, p) = 1`. "Know the endpoints, recover the path" is literally true.
-- The alphabet `Z_p` is a cyclic group and the generating operation is
-  translation, so a product-of-circles embedding makes the task linear.
-
-Both are hardcoded gifts to the architecture under test. A win here is
-necessary, not sufficient.
-
-## Design
-
-Backbone is a 2-layer pre-LN transformer, `d_model=64`, 4 heads, ~100k params.
-Shared across all arms; only the attention mask and the token-space
-parameterization change.
-
-**Fibers**
-
-| | |
-|---|---|
-| `free` | separate input embedding and output head. No closure. |
-| `tied` | one matrix reads types in and reads them back out. The closure that already exists in every real LM. |
-| `cyclic` | `e(t) = concat_j [a_j cos(2πjt/p), a_j sin(2πjt/p)]` over `K=8` frequencies, lifted to `d_model` by a learned map, readout tied through the same map. Translation of the token value becomes a *rotation*, one 2-plane per frequency. |
-
-**Arms** — `{ar/std, ar/endpoints_first, bvp} × {free, tied, cyclic}`, plus a
-permuted-vocabulary control on the `bvp` arm.
-
-`ar/endpoints_first` presents the sequence as `[x_0, x_{L-1}, x_1, ..., x_{L-2}]`
-so an AR model sees both boundary conditions before producing any interior
-token. It exists so the comparison isn't a straw man.
-
-`evaluate.ar_is_native` checks whether the *given* positions form a prefix of a
-model's ordering. Cells an AR model structurally cannot reach are reported
-`n/a` rather than scored as failures.
+```bash
+python semagram.py --task bridge      # synthetic BVP unit test, ~1 min
+python semagram.py --task text        # headline run + both baselines
+python semagram.py --diagnose         # four structural diagnostics
+python semagram.py --ablate --seeds 3 # leave-one-out over the structural flags
+```
 
 ## Results
 
-### Main grid, per-token accuracy on held-out sequences (chance = 1.03%)
+`bridge` works, and for the reason the design predicts. `text` went from *worse
+than a unigram predictor* to a real character model, but does **not** match a
+parameter-matched bidirectional transformer.
+
+4-char gap infill, 12 free positions, two-sided context, 20k steps, ~0.19M
+params (baselines +5.5%). References: unigram 3.309, bigram 2.482.
+
+| model | gap NLL | acc | gap-start NLL |
+|---|---|---|---|
+| **semagram** | **2.373** | 0.320 | 2.126 |
+| bidirectional transformer, same objective | 2.202 | 0.356 | 1.949 |
+| causal transformer, left context only | — | — | 1.514 |
+
+- **Uses context, clearly.** 2.373 beats the bigram table (2.482) and the
+  masked-arc score 2.959 beats unigram (3.309). The original code did neither.
+- **The right-hand boundary condition is worth +0.057 nats**, measured inside
+  one model at one position with identical left context (`boundary_masks`) —
+  the text analogue of `bridge`'s both-ends vs prefix-only split.
+- **It does not match the bidirectional baseline** (+0.171, target was 0.1).
+  Reported rather than tuned away.
+- The causal column varies objective *and* architecture at once and is not an
+  architecture result; read it against the bidir row, which holds the objective
+  fixed. Both masked models trail causal by ~0.5 nats, which is the masked
+  objective's sample-inefficiency, not the circular geometry.
+
+`bridge` (26-symbol step function, clamp the two adjacent endpoints, solve the
+interior): **both-ends 1.000, prefix-only 0.247, gap +0.753**. Nothing in the
+prefix reveals the second half, so a causal model is structurally incapable of
+it. This is the claim working.
+
+Qualitatively, gap infill went from blanks to English-shaped text:
 
 ```
-model                          next     infill   reverse
-ar/std | free                 61.6%      n/a      n/a
-ar/std | tied                100.0%      n/a      n/a
-ar/std | cyclic               99.9%      n/a      n/a
-ar/endpoints_first | free      n/a       0.9%     n/a
-ar/endpoints_first | tied      n/a       0.9%     n/a
-ar/endpoints_first | cyclic    n/a       0.9%     n/a
-bvp | free                     0.8%      1.0%     0.8%
-bvp | tied                     0.9%      0.8%     1.1%
-bvp | cyclic                   1.4%      1.0%     1.2%
-  control (permuted vocab)
-bvp | free                     0.9%      0.9%     0.8%
-bvp | tied                     1.3%      0.8%     1.4%
-bvp | cyclic                   0.9%      0.9%     0.9%
+true  And you,[ ][s][i][r]! you are [w][e][l][c]ome. Trave[l][ ][y][o]u far on
+pred  And you,[ ][a][o][d]! you are [a][e][ ][c]ome. Trave[ ][ ][y][o]u far on
 ```
 
-Three things to read off:
+The *endpoint* reconstruction is still mostly blank, and that is the metric
+rather than the model: predicting 36 Shakespeare characters from 12 has enormous
+conditional entropy and emitting the unigram mode is near CE-optimal there.
 
-- The `bvp` arm failed entirely (final losses 4.55–4.57 vs `ln 97 = 4.575`).
-- `ar/endpoints_first` reached train loss 0.93–1.06 while sitting at chance on
-  test: memorization without generalization, the pre-grok regime.
-- The permuted-vocab control is **void**. It can only falsify anything if the
-  unpermuted models learned, and in the `bvp` arm none did. Right control,
-  wrong arm.
+## The failure, and what actually caused it
 
-### Diagnostic: infill-only training
+Starting point: validation NLL stuck at **3.42**, worse than a context-free
+unigram predictor, decoding to blanks. Six causes, in descending order of how
+much they mattered:
 
-The `bvp` failure is plausibly *breadth* — the any-order objective must learn
-modular inversion at every index gap at once, and averages its loss over masks
-where the target is information-theoretically undetermined. `diagnostic.py`
-trains on the infill mask alone (clamp both endpoints, mask the interior), so
-the model needs one inverse instead of all of them.
+| cause | effect |
+|---|---|
+| readout had no bias and was untied — could not express a constant | gap 3.35 → 2.75 |
+| band limit applied to the signal, not the kernel | 1 usable Fourier mode of 25 |
+| weight decay on the tied readout | collapse at ~step 5000 |
+| nothing in the model broke reflection symmetry | bigram unrepresentable |
+| endpoint metric measured itself | unigram mode near-optimal |
+| connection initialised trivially | no positional signal at init |
 
-```
-fiber    train loss (6k)  test token acc  exact  acc@1  acc@4   AUROC res/energy/maxprob
-cyclic        1.572           50.9%       4.6%   4.6%   4.6%     0.500 / 0.532 / 0.487
-tied          2.346            5.9%       0.0%   0.0%   0.0%       nan / nan  / nan
-```
+### The band limit was on the signal
 
-## What this supports and what it kills
+`spectral_multiplier` padded modes above `M` with `1e3`. In the preconditioned
+descent those modes are multiplied by `1 - eta*g/(g+1) ~ 1 - eta` every sweep, so
+after `K` sweeps they are gone. `d_spectrum` perturbs the free arc with white
+noise and reports the per-mode transfer: in-band to out-of-band gain ratio
+**1.3e6**, leaving **1 usable mode out of 25**. A free position could carry DC
+and nothing else — which is precisely a wall of spaces. The spec says band-limit
+the *kernel*; the state should keep full bandwidth.
 
-**The one positive result.** Cyclic geometry is *redundant* where tying already
-suffices and *load-bearing* where it doesn't:
+### Nothing broke reflection symmetry — and it was not Q=K tying
 
-- repeated **addition** (`next` task): tied 100.0% vs cyclic 99.9% — no effect.
-- modular **inversion** (`infill` task): cyclic 50.9% vs tied 5.9% — ~9×.
-
-Mechanism: inversion is a rotation by a scaled angle, which the cyclic basis
-makes linear, while a free or tied table has to memorize 97 inverses. This is
-essentially the grokking-Fourier result arriving at initialization rather than
-after a phase transition, so it is not new — but it is a clean statement of
-*when* the prior pays, and it is reproducible in three minutes on a CPU.
-
-**The halting certificate is refuted.** AUROC 0.500 (fixed-point residual) and
-0.532 (log-sum-exp energy) against a 0.487 max-probability control, on a model
-at 50.9% token accuracy with both correct and incorrect examples present. And
-`acc@1 == acc@4`: four refinement steps do exactly what one does. There is no
-fixed-point structure for a residual to measure. A single-shot denoiser with a
-symmetric readout is not a solver.
-
-**The factorization claim is unestablished, not refuted.** `ar/std` needs
-`s = x_1 − x_0` plus repeated addition; `bvp` infill needs
-`s = (x_7 − x_0)·7⁻¹ mod 97`. Those are not the same task differently factored —
-the second is strictly harder. The confound is now identified but the clean
-experiment has not been run.
-
-## Next experiments, in priority order
-
-1. **Matched difficulty.** Give AR the inversion task too (present
-   `[x_0, x_{L-1}]` and require the interior) at 10⁴–10⁵ steps so both arms get
-   past grokking. Only then is "BVP vs AR" a real comparison.
-2. **Make the solve a solve.** The refinement loop currently converges to
-   nothing, which means the variational framing is ornamental in this code.
-   Either implement the actual CCCP iteration with the clamp term inside the
-   objective so a fixed point exists, or drop the energy vocabulary.
-3. **Frequency ablation.** Sweep `K` and inspect learned `amp`. If a single
-   frequency suffices, the fiber prior is even cheaper than advertised.
-4. **Rescue the control.** Re-run permuted-vocab on the infill-only arm, where
-   models actually learn, so it can do the falsification job it was built for.
-5. **Non-group task.** Replace `Z_p` translation with something lacking group
-   structure. The cyclic prior should collapse; if it doesn't, the mechanism
-   story above is wrong.
-
-## Reproduce
-
-```bash
-pip install jax jaxlib optax
-python run_experiment.py --steps 5000       # full grid, ~20 min CPU, resumes from results.json
-python run_experiment.py --steps 1500       # smoke test
-python diagnostic.py --fiber cyclic --steps 6000   # ~3 min
-python diagnostic.py --fiber tied   --steps 6000
-```
-
-`run_experiment.py` persists after every run and skips completed cells, so an
-interrupted grid costs at most one run.
-
-## Files
+The original tied `W_q = W_k`, justified as what makes the gradient
+conservative. That justification is false (any scalar has a conservative
+gradient). The obvious replacement claim — that tying makes the model
+reflection-blind — is *also* false. Tying does make the logit matrix exactly
+symmetric, but symmetric logits do not imply an equivariant model. Per 2-plane,
 
 ```
-semagram/data.py       task, splits, orderings, eval specs
-semagram/model.py      transformer + the three fiber parameterizations
-semagram/train.py      AR and any-order-denoising objectives
-semagram/evaluate.py   three conditioning modes, AR native-ordering check,
-                       iterative solve, AUROC
-run_experiment.py      factorial grid + control
-diagnostic.py          infill-only training
-results.json           main grid output
-mine_diagnostic.json   diagnostic output
+W^T R(dth) W = cos(dth) * (W^T W)  +  sin(dth) * (W^T J W)
 ```
 
-`unverified_diagnostic.json` is a `cyclic@6000` result found in the working
-directory that I did not launch (the container held state from another session).
-My own rerun reproduced it exactly — same config, same seed, deterministic — but
-it is kept separate because I cannot vouch for its provenance.
+and `W^T J W` is antisymmetric, nonzero, and odd in `dth`, so orientation
+survives tying — measured, `tied + flat` has reflection residual 0.19, and the
+ablation below shows tied models stay *directed* while still failing.
 
-## Caveats
+What was actually wrong: *no term broke the symmetry*. The circulant kernel is
+even; `rmsnorm` and the Hopfield term are pointwise; and the content-dependent
+connection is covariant — reversing the loop reverses each transport — so it
+cannot break reflection however it is trained. With the flat base off, the whole
+solve is equivariant to **6e-15** in float64 regardless of `W_q`, `W_k`. It could
+not tell `th` from `ht` because there was nothing there to tell them apart with.
 
-- Single seed (0) throughout. No error bars. The 100.0% / 99.9% and 50.9% / 5.9%
-  gaps are large relative to plausible seed variance, but this is not measured.
-- `d_model=64`, 2 layers, 5–6k steps, CPU. Everything here is small.
-- Positional encoding is learned-absolute for all arms. At `L=8` the positional
-  prior is irrelevant, so none of the interval/Dirichlet/DST argument that
-  motivated this design is tested at all.
-- Any-order AR training (XLNet-style) would cover all three conditioning modes,
-  and any-order AR is close to the masked objective. So the AR-vs-BVP axis is
-  really about the training distribution over factorizations, not architecture.
+The only term that can break it is a connection attached to the **ring** rather
+than the content, because that one does not reverse. That is the flat RoPE base,
+promoted from "nicer initialisation" to load-bearing.
+
+## Ablation
+
+Leave-one-out from the best config, plus the full `tied × flat` 2×2 because
+that is the one place an interaction was plausible. 3 seeds, 4000 steps,
+`python semagram.py --ablate --seeds 3`. `refl` is the isolated reflection
+residual: **~1e-4 means the model is provably blind to the direction of the
+loop**, ~1e-2 and above means it is directed.
+
+| config | gap NLL | gap acc | refl | Δ vs best |
+|---|---|---|---|---|
+| **best** | **2.625 ± 0.013** | 0.278 | 3.3e-02 | — |
+| `soft_clamp` (λ=0.5) | 2.648 ± 0.018 | 0.274 | 4.0e-01 | +0.023 |
+| `band_pad=1e3` | 2.828 ± 0.018 | 0.242 | 1.2e-01 | +0.204 |
+| `no-flat` | 3.091 ± 0.027 | 0.179 | **1.6e-04** | +0.466 |
+| `tied` | 3.121 ± 0.035 | 0.186 | 4.6e-02 | +0.496 |
+| `as-shipped` | 3.219 ± 0.191 | 0.162 | 1.1e-02 | +0.594 |
+| `tied+no-flat` | 3.220 ± 0.017 | 0.161 | **4.5e-04** | +0.595 |
+
+Reading the table:
+
+- **`tied` and `no-flat` cost about the same (+0.50, +0.47) for different
+  reasons**, and the `refl` column separates them. `no-flat` is reflection-blind
+  (1.6e-04); `tied` stays firmly **directed** (4.6e-02) and fails anyway. So
+  untying was the right call for the reason `old/semagram.py:132` gave — the
+  channel map `W_q^T W_k` vs a symmetric `W^T W` — and *not* for the
+  symmetry reason this file originally claimed. The two effects are separable
+  and roughly additive (`tied+no-flat`, +0.595).
+- **No interaction worth the name.** +0.496 and +0.466 individually, +0.595
+  together, well short of additive. These are two independent handicaps, not a
+  crossing.
+- `soft_clamp` is inside noise (+0.023) but drives the closure residual to 0.40,
+  i.e. it buys nothing and destroys the holonomy's interpretability.
+- `as-shipped` has by far the **largest seed variance** (±0.191): one seed
+  reached 2.949 and two collapsed outright. The original configuration was not
+  merely bad, it was unstable.
+
+## Stability
+
+The unigram is an **absorbing state** — flat readout, uninformative solved
+state, no gradient back out. At `lr=3e-3` the model is bistable about it: the
+same seed with byte-identical code reached gap NLL **2.356** in one run and
+**3.333** in another, separating between steps 4000 and 5000 through
+floating-point nondeterminism alone. That is the reproducibility warning in the
+modular-arithmetic section below, in a sharper form: not 4 percentage points,
+but the difference between working and not.
+
+The nondeterminism is strictly **cross-process**: the ablation grid ran two
+configurations that turned out to be identical (`hard_clamp=True` is already the
+default) and they agreed to every printed digit, 2.643/2.643 and 2.611/2.611,
+seed for seed. Within one process this is reproducible; across processes, XLA
+reduction order is enough to change the outcome. `as-shipped` shows the same
+bistability at 4000 steps (±0.191 across seeds: one run at 2.949, two
+collapsed), so this is a property of the original design, not something the
+fixes introduced.
+
+The default `lr` is therefore `2e-3`, which has not been observed to collapse
+and scores better anyway. `main_text` prints a `COLLAPSED` banner rather than
+tabulating a degenerate run as an architecture result.
+
+## What was tried and did not work
+
+Each was a plausible mechanism, measured and dropped. The negative results were
+most of the work.
+
+| hypothesis | measured |
+|---|---|
+| Q=K tying makes the model reflection-blind | residual 0.19 — directed; refuted |
+| gradient clipping fixes the collapse | 4.415 vs 2.639, and collapses *sooner* |
+| the solver contracts too hard, wasting the unroll | `g_floor` 0.1: 2.642 vs 2.584 |
+| the unroll needs more depth | `k_steps` 16: 2.683 vs 2.584 |
+| hard clamping blocks contextualisation | soft clamp 2.580 vs 2.560; catastrophic above `lam~1` |
+| the peaked tied readout needs scaling down | collapses to unigram immediately |
+| a saturating gauge phase causes the collapse | neutral across `phi_dev` 0.0–1.0 |
+
+The last row deserves its own note: `phi_dev=0.0` removes the content-dependent
+connection *entirely* and costs nothing (2.472 vs 2.462 at `1.0`). **The
+"ambiguity is holonomy" mechanism earns nothing measurable on this task**; the
+fixed flat base does the work. It is kept, bounded at 0.1, because it keeps the
+winding numbers interpretable at no measured cost — not because it was shown to
+help.
+
+## Diagnostics
+
+`python semagram.py --diagnose` runs four checks against untrained models in
+four configurations. Each targets one structural claim and each can refute it.
+
+- `d_spectrum` — per-mode transfer of the solver on the free arc.
+- `d_reflection` — is the solve equivariant to reversing the loop? Reported
+  twice: as-is (nonzero even when blind, because a connection with holonomy has
+  a branch cut at the gauge origin) and with the content phase zeroed, which
+  isolates the structural question.
+- `d_clamp_echo` — can a given token survive the solve, and does it ever become
+  contextual?
+- `d_residual` — stationarity residual per sweep.
+
+## Honest limits
+
+- **The solver is not a solver.** `SOLVER="descent"` is a truncated,
+  preconditioned unroll whose iteration matrix has spectral radius > 1 for every
+  step size, because `-logsumexp` of a quadratic form supplies genuine negative
+  curvature. It is a weight-tied K-sweep network parameterised by an energy —
+  not a DEQ, and implicit differentiation would be unsound for it.
+- **The energy formulation forces a tied FFN.** A conservative gradient needs a
+  symmetric Hessian, so the Hopfield term's `w2` must equal `w1^T`. That is a
+  real expressivity cost of the framing, not an implementation choice.
+- Headline numbers are single-seed; the ablation uses 3 seeds.
+- `n=48`, `d=160`, 20k steps. Everything here is small.
+

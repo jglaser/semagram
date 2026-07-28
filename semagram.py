@@ -1267,7 +1267,11 @@ def main_ablate(args):
         "no-flat":           dict(flat=False),
         "tied+no-flat":      dict(tied=True, flat=False),
         "band_pad=1e3":      dict(band_pad=1e3),
-        "hard_clamp":        dict(hard_clamp=True),
+        # hard_clamp is already the default, so flipping it ON would be a no-op
+        # duplicate of `best`. The ablation is the soft clamp, at the only lam
+        # that trains at all -- above ~1 the nonlocal preconditioner smears the
+        # restoring force across the free arc and the run collapses.
+        "soft_clamp":        dict(hard_clamp=False, lam=0.5),
         "as-shipped":        dict(tied=True, flat=False, band_pad=1e3,
                                   hard_clamp=True, tie_head=False),
     }
