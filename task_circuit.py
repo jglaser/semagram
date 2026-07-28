@@ -20,11 +20,15 @@ TWO COLUMNS, and only one of them is a comparison.
   DEPTH extrapolation at fixed 4 qubits, braid against a rotary transformer.
   Both models can attempt this, so it is a fair fight.
 
-  QUBIT extrapolation, tied against untied. The transformer cannot enter this
-  column at all, and for two independent reasons: a 6-qubit circuit contains
-  gate tokens whose embedding rows do not exist in a 4-qubit model, AND its
-  output layer has a fixed width of 4 while the answer needs 6 numbers. Not a
-  beaten baseline -- a comparison that cannot be set up.
+  QUBIT extrapolation, tied against untied. The transformer is RUN here but the
+  column is not a fair comparison and its numbers should not be read as one: a
+  6-qubit circuit contains gate tokens whose embedding rows never received a
+  gradient in 4-qubit training, so it is reading its input off random init. That
+  is the same defect that invalidated the absolute-position baseline earlier in
+  this project, except here it is not fixable -- it is what "a symbol the model
+  has never seen" means. Its output width is NOT the obstacle; `out` is built
+  `n_max` wide precisely so that the fixed-width excuse is not doing any work
+  and the token problem is visible on its own.
 
 THE HONEST LIMITATION. The layer carries one vector per qubit, and a real
 quantum state is entangled across 2^n dimensions and does not factor that way.
@@ -216,9 +220,12 @@ def run(a):
     for nm, (npar, r) in rows.items():
         print(f"{nm:14s} {npar:8d}" + "".join(f" | {r[t]:24.3f}" for t in packs))
     if "tf-rope" in rows:
-        print("\nThe transformer is absent from the qubit columns by "
-              "construction: its output\nwidth is fixed and its gate-token rows "
-              "for unseen qubit pairs never trained.")
+        print("\nThe qubit columns are NOT a fair transformer comparison: gate "
+              "tokens for unseen\nqubit pairs never received a gradient, so "
+              "those entries measure random init.\nThe depth column is the fair "
+              "fight, and even there the transformer pools the\nsequence while "
+              "the braid layer keeps a slot per qubit -- an architectural match "
+              "to\nthe per-qubit target, not only a symmetry advantage.")
 
 
 if __name__ == "__main__":

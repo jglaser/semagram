@@ -258,35 +258,74 @@ direction.
 
 **Conjugation invariance, installed rather than charged for.** Accumulate a
 matrix along the word instead of a vector, `M <- G(i, sign) @ M` from `M_0 = I`,
-and read out class functions: `tr(M)`, `tr(M^2)`, `log|det M|`. Then
-`tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two conditions make it
-exact and both were missing before: `G(i, -1)` must invert `G(i, +1)`, which is
-Reidemeister II and is here **computed rather than penalised**; and `G` must act
-where the letter names while being the same map everywhere, which is what tying
-achieved. This is the shape of the reduced Burau representation with a learned
-block.
+and read out class functions -- `tr(M^j)` for `j = 1..n`, which by Newton's
+identities is the characteristic polynomial and therefore the **complete**
+conjugation invariant. `tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two
+conditions make it exact and both were missing before: `G(i, -1)` must invert
+`G(i, +1)`, which is Reidemeister II and is here **computed rather than
+penalised**; and `G` must act where the letter names while being the same map
+everywhere, which is what tying achieved. This is the shape of the reduced Burau
+representation with a learned block.
 
-| model | test R2 | extrapolation R2 | conjugation error |
-|---|---|---|---|
-| tanh + mean-pool (tied) | **0.730** | **0.267** | 1.86e-01 |
-| trace readout, `k = 3` | 0.259 | 0.004 | **3.7e-07** |
-| trace readout, `k = 6` | 0.284 | **-1.428** | **6.5e-07** |
+*The first version of this readout was rigged, and the fix mattered.* It used
+four features -- `tr(M)`, `tr(M^2)`, `log|det M|` and its sign -- and two of the
+four were the same thing. Every `_embed` lift is the identity outside a `2k`
+block, so `det(E) = det(blk)` and hence
+
+    log|det M| = writhe * log|det blk|
+
+*exactly*: verified against this code at three writhes, agreeing to all printed
+digits. The determinant feature was **the writhe** -- a letter count any model
+gets for free -- and its sign was the parity of the same. That put a
+four-dimensional readout against mean pooling's thirty-two and attributed the
+gap to conjugation. `blk` is now normalised to `|det| = 1`, which removes the
+writhe channel by construction, and the full `n` traces are used.
+
+| model | features | test R2 | extrapolation R2 | conjugation error |
+|---|---|---|---|---|
+| tanh + mean-pool (tied) | 32 pooled | **0.730** | **0.267** | 1.86e-01 |
+| trace, 4 feats, 2 = writhe *(retracted)* | 4 | 0.259 | 0.004 | 3.7e-07 |
+| trace, `k = 3`, complete invariant | 12 | 0.275 | 0.109 | **7.3e-07** |
+| trace, `k = 3`, overflow-safe log form | 12 | 0.225 | 0.064 | 1.1e-06 |
+| trace, `k = 6`, overflow-safe log form | 24 | 0.254 | 0.063 | 9.4e-07 |
+
+Removing the bottleneck moved extrapolation **0.004 to 0.109**, a factor of 27,
+so the objection was substantive. The `k = 6` row answers the width question
+directly: twenty-four exactly-invariant features against mean pooling's
+thirty-two, and it still lands at 0.063.
+
+The `k = 6` blow-up in the retracted row was also diagnosable rather than
+fundamental. `tr(M^24)` overflowed and the run went to NaN; carrying the
+magnitude in the exponent (`M^j = exp(logs) * P_hat` with `P_hat`
+unit-Frobenius, exact bookkeeping) fixes it. That costs resolution -- a signed
+log compresses -- which is why the log rows score below the direct one at
+`k = 3`. Both are kept: the direct form is the better model, the log form is the
+only one that runs at `k = 6`.
 
 The mean-pool model's conjugation error is **98.5% of its own output scale** --
 not imperfectly invariant, maximally non-invariant. The trace readout is
-**2.7e+06 times** more invariant, exactly and by construction, and it costs
-almost all the task performance. At `k = 6` extrapolation is worse than
-predicting the mean, which is the numerical fragility of long matrix products.
+**2.7e+05 times** more invariant, exactly and by construction, and it costs
+**2.4x** at extrapolation.
 
 **So conjugation is not a useful symmetry for this target**, and both routes
-agree -- the penalty and the construction. The Jones polynomial of a closure
-genuinely *is* conjugation invariant, so imposing it "should" help; but a target
-being invariant does not make the best *estimator* invariant. Restricting to the
-invariant function class is a real capacity cost, and against a four-dimensional
-class-function bottleneck the cost dwarfs the benefit.
+agree -- the penalty and the construction, which fail for different reasons. The
+Jones polynomial of a closure genuinely *is* conjugation invariant, so imposing
+it "should" help; but a target being invariant does not make the best
+*estimator* invariant. Restricting to the invariant function class is a real
+capacity cost, and here the cost exceeds the benefit.
 
 That is the same shape as the Yang-Baxter turnover, now measured on a second
 symmetry by a second method: **exactness costs capacity.**
+
+*One limit on how far this generalises.* Jones needs the **Markov** trace, which
+satisfies `tr(x sigma_n) = z tr(x)` -- the stabilisation property is what makes
+it a closure invariant, and `braids.py` uses exactly that for ground truth. The
+ordinary trace of a generic learned representation is conjugation-invariant but
+**not** stabilisation-invariant. So `trace_layer` installs one Markov move while
+using a trace that is not the one link invariants are built from. Its collapse
+is consistent with conjugation being useless here, and it is also consistent
+with the readout being the wrong trace. The penalty route is free of that
+objection and points the same way, which is why the conclusion rests on both.
 
 ## Getting the baseline right
 
@@ -330,6 +369,19 @@ exactly and length-generalise perfectly; the transformer reaches 0.542 in
 distribution and 0.020 on longer words, against chance at 0.042 -- i.e. it does
 not transfer at all.
 
+*The correction made the baseline worse here, and that is worth saying out
+loud.* Everywhere else, repairing the transformer moved a number **against** the
+layer -- the untrained `pos` rows, then the rotary base, each time shrinking the
+gap. This is the one place it moved the other way: in distribution the
+transformer went from 0.702 with absolute positions to 0.542 with rotary at base
+8. The likely cause is over-rotation. Base 8 was tuned for the 16-token braid
+words; these permutation words are 8 tokens, so the same base spins the fast
+bands roughly twice as far per unit of distance as intended. That makes this
+particular row a comparison against a baseline tuned for a different sequence
+length, and the honest reading of the permutation result does not depend on it
+-- the braid layer is at 1.000 either way, and the reason is architectural match
+rather than symmetry.
+
 **Read this as weaker than it looks, and not because of the baseline.** The task
 is an almost perfect architectural match -- the layer's state *is* the permutation state, so it needs
 only to learn "swap these two vectors", after which length-generalisation is
@@ -342,6 +394,67 @@ the only measurement where that contribution is isolated.
 One detail worth keeping: `braid-ybe` drove its Yang-Baxter residual to 1.26e-07
 here, against 1.66e-02 on knots. The learned maps became near-exact braid
 representations on their own when the task permitted it.
+
+## Quantum circuits: a real application, and a failed prediction
+
+A circuit on `n` qubits is a sequence of two-qubit gates on adjacent pairs; a
+braid word on `n` strands is a sequence of generators on adjacent pairs. Qubits
+are strands, gates are generators, depth is word length, qubit count is strand
+count. `circuits.py` builds the dataset by exact statevector simulation -- for
+`n <= 6` the state is 64 complex numbers and nothing is approximated -- and the
+target is `<Z_i>`, the expectation of a Z measurement on every qubit, from a
+`Ry(pi/4)|0>` start so no qubit sits at a trivial +-1.
+
+The symmetry is deliberately a *different* one. Quantum gates do not satisfy
+`sigma_i sigma_{i+1} sigma_i = sigma_{i+1} sigma_i sigma_{i+1}`, so the
+Yang-Baxter penalty is not imported and `--w-ybe` is zero throughout. What both
+structures share exactly is **far commutation**: operations on disjoint pairs
+commute, verified at 0.0e+00. The layer has that structurally -- a gate writes
+only two slots -- and the transformer must learn it.
+
+| model | params | depth 12-18 (trained 4-10) | in dist | 5 qubits | 6 qubits |
+|---|---|---|---|---|---|
+| `braid` (tied) | 16865 | **0.891** | **0.992** | **0.988** | **0.987** |
+| `braid-untied` | 83425 | 0.858 | 0.986 | -2.060 | -2.564 |
+| `tf-rope` | 15626 | 0.201 | 0.606 | *-19.5* | *-19.1* |
+
+**The prediction recorded before the run was wrong.** It said the braid layer
+would beat the transformer on depth extrapolation *by less* than on knots,
+because far commutation is a weaker and more learnable symmetry than the braid
+relation. The gap is 1.54x on knots and **4.4x** here. The prediction failed in
+the direction that flatters the architecture, which is the direction to be most
+suspicious of, so:
+
+**Read the 4.4x down, for a reason that has nothing to do with symmetry.** The
+target is one number per qubit, and the braid layer carries one vector per
+qubit and reads out per qubit; the transformer pools the gate sequence and emits
+the whole vector from the pooled state. That is an architectural match to the
+output shape, and it shows up in distribution as well -- 0.992 against 0.606,
+where extrapolation is not yet in play. The depth column measures match plus
+symmetry together and this benchmark does not separate them.
+
+The qubit columns are **not** a transformer comparison and the italics mark
+that. A 6-qubit circuit contains gate tokens whose embedding rows never received
+a gradient, so those entries are reading random init -- the same defect that
+invalidated the absolute-position baseline, except unfixable, because it is what
+"a symbol the model has never seen" means. The real comparison there is tied
+against untied, and it reproduces the strand result on a completely different
+task: **0.987 against -2.564** at a qubit count never trained on, with the tied
+model carrying one fifth the parameters.
+
+Two confounds were caught before any of these numbers were trusted. The first
+gate set, `{CZ, iSWAP}`, gave a **constant** target -- `<Z_i> = 0.7071` for
+every qubit of every circuit, standard deviation exactly zero -- because CZ is
+diagonal and iSWAP exchanges amplitudes that start identical. CNOT fixes it. The
+second was the benchmark measuring the wrong thing: at fixed depth, more qubits
+means fewer gates *per qubit*, so 6-qubit extrapolation (0.808) initially beat
+4-qubit interpolation (0.637). `--scale-depth` holds gates-per-qubit at 1.75
+across every column, and the numbers above are the corrected ones.
+
+**What this is not.** The layer carries one vector per qubit; a real quantum
+state is entangled across `2^n` dimensions and does not factor that way. This is
+a cheap surrogate for a measurable quantity, not a simulator, and nothing here
+bears on whether it could replace simulation. It could not.
 
 ## The ground truth is verified two independent ways
 
@@ -385,6 +498,11 @@ makes it a degenerate regression target.
 | `braids.py` | braid words, knot closures, exact Jones polynomials (two ways) |
 | `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baselines |
 | `rIII_probe.py` | measures Reidemeister-III invariance directly, independent of the task |
+| `task_strand.py` | train on 3 strands, run on 5 -- the column no transformer can enter |
+| `trace_layer.py` | conjugation invariance by construction, via `tr(M^j)` |
+| `task_perm.py` | the same layer on permutation composition, no topology |
+| `circuits.py`, `task_circuit.py` | exact quantum-circuit simulation, and the layer on it |
+| `scaling.py` | does the advantage survive more data and more parameters? |
 | `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
 | `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |
