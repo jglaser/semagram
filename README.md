@@ -614,13 +614,13 @@ at all*, changing only the sweep schedule of an already-trained model:
 | 0.1 | 100 | 4.295 | 0.2997 |
 
 Four extra sweeps cost 0.385 nats. Twenty-four cost 3.3. The state is only
-meaningful at exactly the `K` it was trained at, because -- as `SOLVER STATUS`
-says -- `-logsumexp` of a quadratic form supplies genuine negative curvature,
-the iteration matrix has spectral radius above 1, and the unroll *diverges* if
-allowed to run. Part I measured that spectral radius. This table is what it
-costs, and it is the reason the constraint story fails: adding a term to `S`
-changes what the sweeps descend on, and absorbing that change needs solver
-budget the architecture does not have.
+meaningful at exactly the `K` it was trained at, and adding a term to `S`
+changes what the sweeps descend on, so there is no budget to absorb it.
+
+*The first version of this section blamed that on negative curvature making the
+stationary point unreachable. That explanation is wrong, and Result 5 is the
+measurement that refutes it. The stationary point is perfectly reachable. It is
+just not where the model lives.*
 
 Hence one-shot at a useful weight is a kick and not a descent (`w=30` sends NLL
 3.385 -> 11.7 and makes closure *worse*), continuation does not rescue it, and
@@ -636,6 +636,77 @@ head, so the constraint acts on geometry rather than on a categorical's mean;
 and an energy whose stationary point is actually reachable, which the
 `-logsumexp` attention term rules out by construction.
 
+## Result 5: does the solver matter? Yes -- a better one makes it worse
+
+The natural response to Result 4 is that the solver is the problem: swap the
+fixed-step preconditioned unroll for something that actually converges -- CCCP,
+or L-BFGS, or Newton-CG exploiting the symmetric Hessian -- and you get a
+convergence certificate, `‖∇S‖` as a number that says the forward pass
+succeeded, and implicit differentiation via conjugate gradients instead of
+GMRES-and-hope. All of that is correct in principle. It was measured. `mnist`,
+`sema-so2` seed 0, float64, 8 test contours, minimising the *same* action over
+the free coordinates with the clamped ones held at `emb[t]`.
+
+**The action has a genuine minimum and a real solver finds it easily.**
+
+| solve | `S` | `‖∇S‖` on free coords | NLL |
+|---|---|---|---|
+| unroll, `K=8` (as trained) | -44074.90 | 136.75 | **3.3880** |
+| L-BFGS from the unroll (121 it) | **-49306.05** | 0.0028 | 3.7172 |
+| L-BFGS from the prior init (137 it) | **-49306.05** | 0.0004 | 3.7172 |
+
+Two very different starts reach the same value to seven digits, with the
+gradient driven to `3e-3`. The Hessian on the free coordinates is positive
+definite at that point -- eigenvalues `+5.69` to `+2304`, none negative -- so it
+is a strong local minimum and, from the evidence of two starts, the only one
+worth reaching. Nothing about this landscape is pathological, and CG would work
+on it exactly as advertised.
+
+**The unroll is not descending on it, and never was.**
+
+| `K` | 1 | 2 | 4 | **8** | 12 | 16 | 32 | 64 | L-BFGS |
+|---|---|---|---|---|---|---|---|---|---|
+| `S` | -42110 | -46354 | -41616 | **-44075** | -46404 | -46875 | -44095 | -44932 | **-49306** |
+| `‖∇S‖` | 177 | 115 | 180 | **137** | 107 | 158 | 172 | 161 | **0.003** |
+| NLL | 9.231 | 3.872 | 4.412 | **3.388** | 3.905 | 4.931 | 6.706 | 6.614 | 3.717 |
+
+`S` oscillates in a band and the gradient norm never leaves 107-180. This is not
+slow convergence, it is not divergence either -- it is a cycle. The sweeps are
+not a descent on the action in any regime.
+
+**And the true minimiser is worse at the task than the unroll's output**: 3.7172
+against 3.3880, a third of a nat. The NLL row has its minimum at exactly `K=8`,
+which is exactly the `K` the model was trained with, and degrades in both
+directions.
+
+So the answer to "does the solver matter" is yes, decisively, and in the
+opposite of the hoped direction. **The trained model is not an approximation to
+the minimiser of its own action.** Training shaped a weight-tied 8-step
+recurrence; the energy is the thing that generated the recurrence, not an
+objective the network is trying to reach. Switching to CCCP or Newton-CG buys
+every guarantee on the list -- and delivers you, with a certificate, to a point
+the task does not want. The certificate would be honest and the model would be
+worse.
+
+**The CCCP argument has a specific gap.** It needs the non-quadratic part to be
+concave in the variable being solved for. That holds for `E(ξ) = -(1/β) log Σ_j
+exp(β ⟨ξ, k_j⟩)` with the keys **fixed** -- Hopfield retrieval, or cross
+attention -- where `E` is a concave function of `ξ` and `attention = -∇E` is
+exact. It does not hold for self-attention, where the same state supplies both
+queries and keys, so the argument of the log-sum-exp is *quadratic* in `x` and
+concavity is lost in the composition. Measured on the free coordinates here, the
+attention-plus-Hopfield term alone has **98.4% positive eigenvalues** (range
+`-0.425` to `+3.441`). It is not concave, the concave-convex splitting does not
+apply, and CCCP's monotone-decrease guarantee does not hold for this action.
+
+A related correction to Part I, which the same measurement settles: tying
+`V = K` is required to make the *standard attention formula* a gradient field,
+and that derivation is right. It is not required here, because the layer is not
+the standard formula -- it is `jax.grad` of a scalar, so its Jacobian is a
+Hessian and therefore symmetric for any `W_q`, `W_k`. The two statements answer
+different questions and do not conflict. Part I's ablation is the empirical half
+of it: tying costs `+0.496` nats.
+
 ## What was tried and did not work
 
 Same convention as Part I: each was a plausible mechanism, measured, and either
@@ -650,6 +721,9 @@ dropped or replaced.
 | add the whole constraint at one large weight | a kick, not a descent: NLL 3.4 -> 11.7, closure worse |
 | continuation rescues the constraint | it does not; same failure, NLL 11.7 |
 | run the solver longer to make room for the constraint | +4 sweeps costs 0.385 nats with no constraint present |
+| a proper solver (CCCP / L-BFGS / Newton-CG) fixes the forward pass | it converges (`‖∇S‖` 137 -> 0.003) and the minimiser is 0.33 nats WORSE than the 8-sweep unroll |
+| the concave-convex splitting CCCP needs | the attention term has 98.4% positive eigenvalues in `x`; concave only for FIXED keys |
+| negative curvature is what stops the solve converging (my own Result 4 claim) | refuted -- the Hessian at the minimum is PD, +5.69 to +2304 |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
@@ -699,8 +773,16 @@ specifically because the priors are true of it. The most direct statement of the
 result is that `tf-abs`, which is provably wrong about the geometry, beat every
 model here that is provably right about it.
 
-The two changes most likely to move this are a continuous-valued output head
-(which would make both the closure metric and the constraint mechanism
-meaningful) and an energy without negative curvature (which would make the
-forward pass a solve, and the constraint story available). Neither is a
-hyperparameter.
+Result 5 removes the change I would have suggested first. Making the forward
+pass an actual solve is *easy* -- L-BFGS converges on this action in ~120
+iterations to `‖∇S‖ = 3e-3` -- and it costs 0.33 nats, because the trained model
+is not an approximation to the minimiser of its own action. The energy generated
+a good 8-step recurrence; it is not an objective the network is trying to reach.
+Any argument for this architecture that runs through the variational structure
+has to survive that measurement first, and the honest reading is that the
+structure is doing bookkeeping rather than work.
+
+That leaves a continuous-valued output head as the one change likely to help,
+since it would make the closure metric and the constraint mechanism mean
+something. It is not a hyperparameter, and it would not close 0.23 nats on its
+own.
