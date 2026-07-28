@@ -17,3 +17,7 @@ results*.json
 ablation.json
 input.txt
 *.svg
+
+# delivery artefacts (the patch bundle handed to the user)
+*.patch
+*.patch.tar.gz
