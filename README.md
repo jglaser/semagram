@@ -112,6 +112,37 @@ never the axis. A symmetry has to be **hard enough to be worth having** --
 Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
 behind**.
 
+## Does it work away from knots?
+
+`task_perm.py` is the cheapest control: same layer, same tokens, same
+train-short/test-long protocol, no topology. The word is a sequence of adjacent
+transpositions and the target is the permutation they compose to. The braid
+relation is the Coxeter relation, so Yang-Baxter is exactly true here too, while
+the target has nothing topological in it.
+
+| model | YBE residual | test | extrapolation |
+|---|---|---|---|
+| `braid` | 3.27e-02 | **1.000** | **1.000** |
+| `braid-ybe` | **1.26e-07** | **1.000** | **1.000** |
+| `tf` | -- | 0.702 | 0.018 |
+
+Both braid variants solve it exactly and length-generalise perfectly; the
+transformer reaches 0.702 in distribution and then falls **below chance**
+(0.042) on longer words, having fitted length-specific features that mislead.
+
+**Read this as weaker than it looks.** The task is an almost perfect
+architectural match -- the layer's state *is* the permutation state, so it needs
+only to learn "swap these two vectors", after which length-generalisation is
+free because the layer is a recurrence. Both variants sit at 100%, so there is
+no headroom to separate the symmetry from the architecture, which was the
+question worth asking. It confirms that the advantage is not knot-specific; it
+does not establish that the SYMMETRY generalises, and the knot benchmark remains
+the only measurement where that contribution is isolated.
+
+One detail worth keeping: `braid-ybe` drove its Yang-Baxter residual to 1.26e-07
+here, against 1.66e-02 on knots. The learned maps became near-exact braid
+representations on their own when the task permitted it.
+
 ## The ground truth is verified two independent ways
 
 Because the previous benchmark's lesson was that the benchmark is usually where
