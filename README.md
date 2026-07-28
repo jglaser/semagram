@@ -395,67 +395,6 @@ One detail worth keeping: `braid-ybe` drove its Yang-Baxter residual to 1.26e-07
 here, against 1.66e-02 on knots. The learned maps became near-exact braid
 representations on their own when the task permitted it.
 
-## Quantum circuits: a real application, and a failed prediction
-
-A circuit on `n` qubits is a sequence of two-qubit gates on adjacent pairs; a
-braid word on `n` strands is a sequence of generators on adjacent pairs. Qubits
-are strands, gates are generators, depth is word length, qubit count is strand
-count. `circuits.py` builds the dataset by exact statevector simulation -- for
-`n <= 6` the state is 64 complex numbers and nothing is approximated -- and the
-target is `<Z_i>`, the expectation of a Z measurement on every qubit, from a
-`Ry(pi/4)|0>` start so no qubit sits at a trivial +-1.
-
-The symmetry is deliberately a *different* one. Quantum gates do not satisfy
-`sigma_i sigma_{i+1} sigma_i = sigma_{i+1} sigma_i sigma_{i+1}`, so the
-Yang-Baxter penalty is not imported and `--w-ybe` is zero throughout. What both
-structures share exactly is **far commutation**: operations on disjoint pairs
-commute, verified at 0.0e+00. The layer has that structurally -- a gate writes
-only two slots -- and the transformer must learn it.
-
-| model | params | depth 12-18 (trained 4-10) | in dist | 5 qubits | 6 qubits |
-|---|---|---|---|---|---|
-| `braid` (tied) | 16865 | **0.891** | **0.992** | **0.988** | **0.987** |
-| `braid-untied` | 83425 | 0.858 | 0.986 | -2.060 | -2.564 |
-| `tf-rope` | 15626 | 0.201 | 0.606 | *-19.5* | *-19.1* |
-
-**The prediction recorded before the run was wrong.** It said the braid layer
-would beat the transformer on depth extrapolation *by less* than on knots,
-because far commutation is a weaker and more learnable symmetry than the braid
-relation. The gap is 1.54x on knots and **4.4x** here. The prediction failed in
-the direction that flatters the architecture, which is the direction to be most
-suspicious of, so:
-
-**Read the 4.4x down, for a reason that has nothing to do with symmetry.** The
-target is one number per qubit, and the braid layer carries one vector per
-qubit and reads out per qubit; the transformer pools the gate sequence and emits
-the whole vector from the pooled state. That is an architectural match to the
-output shape, and it shows up in distribution as well -- 0.992 against 0.606,
-where extrapolation is not yet in play. The depth column measures match plus
-symmetry together and this benchmark does not separate them.
-
-The qubit columns are **not** a transformer comparison and the italics mark
-that. A 6-qubit circuit contains gate tokens whose embedding rows never received
-a gradient, so those entries are reading random init -- the same defect that
-invalidated the absolute-position baseline, except unfixable, because it is what
-"a symbol the model has never seen" means. The real comparison there is tied
-against untied, and it reproduces the strand result on a completely different
-task: **0.987 against -2.564** at a qubit count never trained on, with the tied
-model carrying one fifth the parameters.
-
-Two confounds were caught before any of these numbers were trusted. The first
-gate set, `{CZ, iSWAP}`, gave a **constant** target -- `<Z_i> = 0.7071` for
-every qubit of every circuit, standard deviation exactly zero -- because CZ is
-diagonal and iSWAP exchanges amplitudes that start identical. CNOT fixes it. The
-second was the benchmark measuring the wrong thing: at fixed depth, more qubits
-means fewer gates *per qubit*, so 6-qubit extrapolation (0.808) initially beat
-4-qubit interpolation (0.637). `--scale-depth` holds gates-per-qubit at 1.75
-across every column, and the numbers above are the corrected ones.
-
-**What this is not.** The layer carries one vector per qubit; a real quantum
-state is entangled across `2^n` dimensions and does not factor that way. This is
-a cheap surrogate for a measurable quantity, not a simulator, and nothing here
-bears on whether it could replace simulation. It could not.
-
 ## The ground truth is verified two independent ways
 
 Because the previous benchmark's lesson was that the benchmark is usually where
@@ -501,7 +440,6 @@ makes it a degenerate regression target.
 | `task_strand.py` | train on 3 strands, run on 5 -- the column no transformer can enter |
 | `trace_layer.py` | conjugation invariance by construction, via `tr(M^j)` |
 | `task_perm.py` | the same layer on permutation composition, no topology |
-| `circuits.py`, `task_circuit.py` | exact quantum-circuit simulation, and the layer on it |
 | `scaling.py` | does the advantage survive more data and more parameters? |
 | `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
