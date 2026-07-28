@@ -165,6 +165,9 @@ def closure_energy(p, cfg, centres, tokens, clamp, weight):
     return energy
 
 
+ENERGIES.update(close=closure_energy, turn=turn_energy)
+
+
 # ----------------------------------------------------------------------------
 # training
 
@@ -208,6 +211,56 @@ def train_tf(key, data, vocab, n, steps, batch, lr, layers, width, heads, ring,
 # ----------------------------------------------------------------------------
 # evaluation
 
+ENERGIES = {}   # filled in below; keyed by constraint name
+
+
+def constrained_solve(p, cfg, toks, mask, centres, weights, sweeps, kind,
+                      eta=None):
+    """Descend on the constrained action by continuation: raise the weight in
+    stages, warm-starting each solve from the previous one.
+
+    Adding the whole constraint at once does not work, and the failure is
+    informative rather than fatal. The preconditioner is built for the
+    quadratic part of the original action and knows nothing about the new term,
+    so a large weight applied cold is a kick rather than a descent: measured on
+    a lightly-trained model, w=10 in one shot moved the closure error from
+    0.285 to 0.267 while sending NLL from 3.5 to 13.7 -- the state was thrown
+    off the manifold where the readout means anything, without the constraint
+    being satisfied.
+
+    Continuation is the standard remedy for exactly this and costs nothing
+    extra structurally: `solve` already accepts `x0`, so each stage is the same
+    layer called again. It also makes the trade explicit, since every
+    intermediate weight is a point on the curve of "how much NLL does this much
+    closure cost".
+    """
+    cfg = dataclasses.replace(cfg, k_steps=sweeps)
+    if eta is not None:
+        cfg = dataclasses.replace(cfg, eta=eta)
+    mk = ENERGIES[kind]
+    x = None
+    for w in weights:
+        x = L.solve(p, p["emb"][toks], mask, cfg,
+                    extra=(mk(p, cfg, centres, toks, mask, w) if w > 0 else None),
+                    x0=x)
+    return x, cfg
+
+
+def measure(p, cfg, toks, mask, centres, x):
+    lg = L.logits_of(p, x, cfg)
+    ce = optax.softmax_cross_entropy_with_integer_labels(lg, toks)
+    free = 1.0 - mask
+    pred = jnp.argmax(lg, -1)
+    d = decode_angles(toks, mask, pred, centres)
+    soft = jnp.where(mask > 0, centres[toks], jax.nn.softmax(lg, -1) @ centres)
+    return dict(
+        nll=float(jnp.sum(ce * free) / jnp.sum(free)),
+        acc=float(jnp.sum((pred == toks) * free) / jnp.sum(free)),
+        closure=float(jnp.mean(closure_of(d))),
+        soft_closure=float(jnp.mean(closure_of(soft))),
+        turn=float(jnp.mean(turn_defect(d))))
+
+
 def eval_semagram(p, cfg, toks, mask, centres, con_w=0.0, sweeps=None,
                   kind="close", eta=None):
     """Score the layer, optionally with a constraint term added to the action.
@@ -226,8 +279,7 @@ def eval_semagram(p, cfg, toks, mask, centres, con_w=0.0, sweeps=None,
         cfg = dataclasses.replace(cfg, eta=eta)
     extra = None
     if con_w > 0:
-        mk = {"close": closure_energy, "turn": turn_energy}[kind]
-        extra = mk(p, cfg, centres, toks, mask, con_w)
+        extra = ENERGIES[kind](p, cfg, centres, toks, mask, con_w)
     x = L.solve(p, p["emb"][toks], mask, cfg, extra=extra)
     lg = L.logits_of(p, x, cfg)
     ce = optax.softmax_cross_entropy_with_integer_labels(lg, toks)

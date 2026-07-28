@@ -10,6 +10,7 @@ loss cannot see and a per-token decoder cannot control.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -44,14 +45,15 @@ def main(a):
             print(f"  no checkpoint for {cell}")
             continue
         if name.startswith("sema"):
-            cfg = base.__class__(**{**base.__dict__,
-                                    "gauge": "su2" if "su2" in name else "so2",
-                                    "gauge_close": "open" not in name})
-            extra = None
-            if a.constrain > 0:
-                extra = T.closure_energy(p, cfg, centres, te, mask, a.constrain)
-                cfg = cfg.__class__(**{**cfg.__dict__, "k_steps": a.con_steps})
-            x = L.solve(p, p["emb"][te], mask, cfg, extra=extra)
+            cfg = dataclasses.replace(
+                base, gauge="su2" if "su2" in name else "so2",
+                gauge_close="open" not in name)
+            if a.constrain:
+                sched = [float(w) for w in a.constrain.split(",")]
+                x, cfg = T.constrained_solve(p, cfg, te, mask, centres, sched,
+                                             a.con_steps, a.con_kind)
+            else:
+                x = L.solve(p, p["emb"][te], mask, cfg)
             lg = L.logits_of(p, x, cfg)
         else:
             lg = L.tf_forward(p, te, mask, a.heads, name == "tf-ring")
@@ -84,7 +86,9 @@ if __name__ == "__main__":
     ap.add_argument("--phi-dev", type=float, default=0.5)
     ap.add_argument("--cols", type=int, default=8)
     ap.add_argument("--size", type=int, default=140)
-    ap.add_argument("--constrain", type=float, default=0.0)
-    ap.add_argument("--con-steps", type=int, default=40)
+    ap.add_argument("--constrain", default="",
+                    help="comma-separated continuation schedule, e.g. 0.1,1,10")
+    ap.add_argument("--con-kind", default="close", choices=["close", "turn"])
+    ap.add_argument("--con-steps", type=int, default=25)
     ap.add_argument("--out", default="shapes.svg")
     main(ap.parse_args())
