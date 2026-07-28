@@ -141,12 +141,25 @@ def forward(p, toks, mask, s, k):
     # tr(M^j) for j = 1..n: the complete set of conjugation invariants, by
     # Newton's identities equivalent to the characteristic polynomial. No
     # bottleneck, and no writhe -- blk is unimodular, so det(M) = 1 identically.
-    feats, P = [], jnp.broadcast_to(jnp.eye(n), M.shape)
+    # tr(M^j) for j = 1..n: the complete set of conjugation invariants. The
+    # naive loop overflows -- at k=6 the matrix is 24x24 and tr(M^24) went to
+    # inf, then inf/(1+inf) = nan, and training died at step 4000. So carry the
+    # magnitude in the exponent: keep a unit-Frobenius P_hat with
+    # M^j = exp(logs) * P_hat, which is exact bookkeeping, not an
+    # approximation, and read out the SIGNED LOG of the trace. A monotone
+    # reparametrisation of an invariant is still an invariant, and the
+    # conjugation error below confirms it empirically.
+    feats = []
+    P = jnp.broadcast_to(jnp.eye(n), M.shape)
+    logs = jnp.zeros((b,))
     for _ in range(n):
         P = P @ M
-        feats.append(jnp.trace(P, axis1=1, axis2=2) / n)
+        nrm = jnp.linalg.norm(P, axis=(1, 2))
+        P = P / nrm[:, None, None]
+        logs = logs + jnp.log(nrm)
+        t = jnp.trace(P, axis1=1, axis2=2) / n
+        feats.append(jnp.sign(t) * (logs + jnp.log(jnp.abs(t) + 1e-30)) / 10.0)
     f = jnp.stack(feats, -1)
-    f = f / (1.0 + jnp.abs(f))            # squash: tr(M^j) grows with j
     return jax.nn.gelu(f @ p["feat"] + p["bf"]) @ p["out"] + p["bo"]
 
 
