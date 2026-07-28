@@ -259,8 +259,12 @@ direction.
 **Conjugation invariance, installed rather than charged for.** Accumulate a
 matrix along the word instead of a vector, `M <- G(i, sign) @ M` from `M_0 = I`,
 and read out class functions -- `tr(M^j)` for `j = 1..n`, which by Newton's
-identities is the characteristic polynomial and therefore the **complete**
-conjugation invariant. `tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two
+identities determines the characteristic polynomial. That is the complete
+conjugation invariant **for generic `M`** and not in general: the power sums fix
+the eigenvalue multiset, but two matrices can share a characteristic polynomial
+and differ in Jordan structure. A learned `blk` is regular semisimple with
+probability one, so the distinction does not bite here -- it is stated because
+it is true. `tr(ABA^-1) = tr(B)` holds because a trace is cyclic. Two
 conditions make it exact and both were missing before: `G(i, -1)` must invert
 `G(i, +1)`, which is Reidemeister II and is here **computed rather than
 penalised**; and `G` must act where the letter names while being the same map
@@ -285,7 +289,7 @@ writhe channel by construction, and the full `n` traces are used.
 |---|---|---|---|---|
 | tanh + mean-pool (tied) | 32 pooled | **0.730** | **0.267** | 1.86e-01 |
 | trace, 4 feats, 2 = writhe *(retracted)* | 4 | 0.259 | 0.004 | 3.7e-07 |
-| trace, `k = 3`, complete invariant | 12 | 0.275 | 0.109 | **7.3e-07** |
+| trace, `k = 3`, full invariant | 12 | 0.275 | 0.109 | **7.3e-07** |
 | trace, `k = 3`, overflow-safe log form | 12 | 0.225 | 0.064 | 1.1e-06 |
 | trace, `k = 6`, overflow-safe log form | 24 | 0.254 | 0.063 | 9.4e-07 |
 
@@ -306,6 +310,19 @@ The mean-pool model's conjugation error is **98.5% of its own output scale** --
 not imperfectly invariant, maximally non-invariant. The trace readout is
 **2.7e+05 times** more invariant, exactly and by construction, and it costs
 **2.4x** at extrapolation.
+
+One objection to this comparison is worth stating because it dissolves on
+inspection: the trace layer has **no nonlinearity anywhere**, so it looks like
+exact invariance is being compared against a strictly more expressive
+recurrence. It is not a separate handicap. Exactness requires
+`M(a b a^-1) = M(a) M(b) M(a)^-1`, so the word-to-matrix map must be a monoid
+homomorphism -- and a homomorphism into matrices under multiplication *is* a
+linear representation. A nonlinearity anywhere in the scan breaks the
+homomorphism and the invariance dies with it. The linearity is entailed by the
+constraint, not chosen alongside it, so the capacity it costs **is** the
+capacity conjugation invariance costs. That is the quantity being measured, and
+this layer is close to the most general exactly-conjugation-invariant model
+available.
 
 **So conjugation is not a useful symmetry for this target**, and both routes
 agree -- the penalty and the construction, which fail for different reasons. The

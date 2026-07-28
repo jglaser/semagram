@@ -63,7 +63,7 @@ import braids as B
 
 
 def init(key, s_max, k, n_out=6, width=128):
-    """Readout width is `s_max * k` -- the COMPLETE conjugation invariant.
+    """Readout width is `s_max * k` -- the conjugation invariant, in full.
 
     The first version used four features: tr(M), tr(M^2), log|det M| and its
     sign. Two of those four were the same thing, and it was not an invariant at
@@ -80,9 +80,17 @@ def init(key, s_max, k, n_out=6, width=128):
     So that comparison had a four-dimensional readout against the mean-pool
     model's thirty-two, and the gap was attributed to conjugation invariance.
     It was a bottleneck I chose. Conjugation invariance does not require one:
-    the complete invariant of an n x n matrix is its characteristic polynomial,
-    equivalently the power sums tr(M^j) for j = 1..n by Newton's identities. At
-    s = 4, k = 3 that is twelve exactly-invariant features, and two were used.
+    the power sums tr(M^j) for j = 1..n determine the characteristic polynomial
+    by Newton's identities. At s = 4, k = 3 that is twelve exactly-invariant
+    features, and two were used.
+
+    "Complete" needs one qualifier. The characteristic polynomial fixes the
+    EIGENVALUE MULTISET, not the conjugacy class -- two matrices can share a
+    characteristic polynomial and differ in Jordan structure, so the power sums
+    are a complete invariant for regular semisimple matrices rather than in
+    general. A learned `blk` is regular semisimple with probability one, so this
+    does not affect any number here, but "complete for generic M" is the
+    accurate statement and the unqualified one is not.
 
     `blk` is also normalised to |det| = 1, which kills the writhe channel by
     construction and keeps the accumulated product better conditioned.
@@ -118,9 +126,21 @@ def _embed(blk, i, s, k):
 def forward(p, toks, mask, s, k):
     """Accumulate the matrix product, read out traces of powers.
 
-    `tr(M)`, `tr(M^2)` and `log|det M|` are class functions: invariant under
-    M -> A M A^-1 for any invertible A. Conjugating the braid word conjugates
-    the accumulated matrix, so these features cannot see the difference.
+    Every `tr(M^j)` is a class function: invariant under M -> A M A^-1 for any
+    invertible A. Conjugating the braid word conjugates the accumulated matrix,
+    so these features cannot see the difference.
+
+    THE LINEARITY IS NOT A DESIGN CHOICE. There is no nonlinearity anywhere in
+    the accumulation, and a review read that as a confound against the tanh
+    model -- exact invariance being compared against a strictly more expressive
+    recurrence. It is not, and the reason matters. Exactness requires
+    M(a b a^-1) = M(a) M(b) M(a)^-1, i.e. the word -> matrix map must be a
+    monoid homomorphism, and a homomorphism into matrices under multiplication
+    IS a linear representation. Put a nonlinearity anywhere in the scan and the
+    map stops being a homomorphism and the invariance dies. So the linearity is
+    entailed by the constraint, and the capacity it costs is exactly the
+    capacity conjugation invariance costs -- which is the quantity this file
+    exists to measure.
     """
     b, L = toks.shape
     n = s * k
@@ -138,10 +158,9 @@ def forward(p, toks, mask, s, k):
 
     M = jnp.broadcast_to(jnp.eye(n), (b, n, n))
     M, _ = jax.lax.scan(step, M, jnp.arange(L))
-    # tr(M^j) for j = 1..n: the complete set of conjugation invariants, by
-    # Newton's identities equivalent to the characteristic polynomial. No
-    # bottleneck, and no writhe -- blk is unimodular, so det(M) = 1 identically.
-    # tr(M^j) for j = 1..n: the complete set of conjugation invariants. The
+    # tr(M^j) for j = 1..n: the conjugation invariants in full (complete for
+    # generic M -- see `init`). No bottleneck, and no writhe: blk is unimodular,
+    # so det(M) = 1 identically. The
     # naive loop overflows -- at k=6 the matrix is 24x24 and tr(M^24) went to
     # inf, then inf/(1+inf) = nan, and training died at step 4000. So carry the
     # magnitude in the exponent: keep a unit-Frobenius P_hat with
