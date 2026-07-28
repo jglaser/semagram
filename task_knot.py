@@ -73,7 +73,6 @@ def init_braid(key, s_max, d, vocab, tie_r=False):
     sc = 1.0 / np.sqrt(2 * d)
     nR = 2 if tie_r else vocab
     return {
-        "tie_r": jnp.asarray(tie_r),
         "R": jax.random.normal(k[0], (nR, 2 * d, 2 * d)) * sc,
         "bR": jnp.zeros((nR, 2 * d)),
         "x0": jax.random.normal(k[1], (s_max, d)) * 0.5,
@@ -181,7 +180,29 @@ def tf_forward(p, toks, mask, heads):
     return h[:, 0] * 0.0 + _pool(p, toks, mask, heads)
 
 
-def _pool(p, toks, mask, heads, use_pos=True):
+def _rope(x, n):
+    """Rotary positions: attention depends on i - j, so unseen absolute
+    positions are not a problem. This is the FAIR baseline.
+
+    NoPE was the first attempt and it is not fair in the other direction: a
+    braid word is order-dependent, so removing position entirely drops the
+    transformer to R2 0.417 in distribution against 0.643 with (broken)
+    absolute positions. Dropping information is not the same as fixing a
+    confound.
+    """
+    dh = x.shape[-1]
+    half = dh // 2
+    if half == 0:
+        return x
+    freq = 1.0 / (10000.0 ** (np.arange(half) / half))
+    ang = np.arange(n)[:, None] * freq[None, :]
+    c = jnp.asarray(np.cos(ang), x.dtype)[None, None]
+    s = jnp.asarray(np.sin(ang), x.dtype)[None, None]
+    x1, x2, rest = x[..., :half], x[..., half:2 * half], x[..., 2 * half:]
+    return jnp.concatenate([x1 * c - x2 * s, x1 * s + x2 * c, rest], -1)
+
+
+def _pool(p, toks, mask, heads, use_pos=True, rope=False):
     """`use_pos=False` is the NoPE baseline, and it is not cosmetic.
 
     Training words are length 4-10 and extrapolation words 12-16, so rows
@@ -201,7 +222,10 @@ def _pool(p, toks, mask, heads, use_pos=True):
         d = q.shape[-1]
         dh = d // heads
         rs = lambda t: t.reshape(b, n, heads, dh).transpose(0, 2, 1, 3)
-        att = jnp.einsum("bhid,bhjd->bhij", rs(q), rs(k)) / np.sqrt(dh)
+        qh, kh = rs(q), rs(k)
+        if rope:
+            qh, kh = _rope(qh, n), _rope(kh, n)
+        att = jnp.einsum("bhid,bhjd->bhij", qh, kh) / np.sqrt(dh)
         att = jnp.where(mask[:, None, None, :] > 0, att, -1e9)
         o = jnp.einsum("bhij,bhjd->bhid", jax.nn.softmax(att, -1), rs(v))
         h = h + o.transpose(0, 2, 1, 3).reshape(b, n, d) @ blk["proj"]
@@ -261,11 +285,13 @@ def run(a):
             # one has to be too.
             target = 32 * a.d ** 2
             layers = 2
-            width = min(range(8, 200, 4),
+            # step 8 so that width/heads is even and rotary pairs line up
+            width = min(range(8, 200, 8),
                         key=lambda w: abs(24 * w ** 2 - target))
             p = init_tf(key, vocab, lmax, layers, width, a.heads)
-            use_pos = (name != "tf-nope")
-            fwd = lambda p, x, m, u=use_pos: _pool(p, x, m, a.heads, u)
+            use_pos = name not in ("tf-nope", "tf-rope")
+            rope = (name == "tf-rope")
+            fwd = lambda p, x, m, u=use_pos, r=rope: _pool(p, x, m, a.heads, u, r)
             def loss(p, x, m, y):
                 return mse(fwd(p, x, m), y)
         npar = sum(v.size for v in jax.tree.leaves(p))
