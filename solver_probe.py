@@ -7,9 +7,11 @@ norm, task NLL, and the Hessian spectrum. Also checks the concavity that a
 concave-convex (CCCP) splitting would need, which does not hold once queries and
 keys come from the same state."""
 
-import sys, numpy as np, jax, jax.numpy as jnp
+import numpy as np
+import jax
+import jax.numpy as jnp
+
 jax.config.update("jax_enable_x64", True)
-sys.path.insert(0,'/home/user/semagram')
 import task_shape as T, loop_layer as L, contours as C
 from scipy.optimize import minimize
 

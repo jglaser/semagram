@@ -458,6 +458,56 @@ python task_shape.py --report                       # tables
 python figure.py --out shapes.svg                   # completions, drawn
 ```
 
+## Running Part II
+
+Everything is CPU-only and single-file; no GPU is needed and none was used.
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install "jax[cpu]" optax numpy scikit-image scipy
+
+python contours.py            # fetch + build the datasets (~57 MB), print stats
+```
+
+The benchmark. Defaults reproduce the tables above (`n=48`, `d=64`, 3000 steps,
+batch 32); about 20 minutes per Semagram model per seed on four CPU cores, and
+under two minutes per transformer. Runs resume -- finished cells are skipped and
+checkpoints are reused -- so it can be interrupted.
+
+```bash
+python task_shape.py --dataset mnist --seeds 3      # sema-so2, sema-su2, tf-abs, tf-ring
+python task_shape.py --dataset fashion --seeds 1
+python task_shape.py --report                       # all tables
+
+# ablations, each a named model rather than a flag
+python task_shape.py --models sema-ink   --seeds 3  # Result 10, content-dependent stiffness
+python task_shape.py --models sema-odd   --seeds 3  # Result 6, directed convolution
+python task_shape.py --models sema-stat0.3 --seeds 3  # Result 8, stationarity penalty
+```
+
+The measurements that need no training beyond the checkpoints above:
+
+```bash
+python variational_gap.py "mnist|sema-so2|s0"   # Result 5 -- the diagnostic
+python solver_probe.py                          # Result 5 -- L-BFGS vs the unroll
+python ood_masks.py                             # Result 7 -- novel conditioning sets
+python ink_weight.py                            # error stratified by curvature
+python figure.py --out shapes.svg               # completions, with closure gaps drawn
+```
+
+The continuous representation, which is the only one whose closure numbers have
+a meaningful floor (0.004 rather than 0.0714):
+
+```bash
+python task_cont.py --repr arc                  # identical data to the benchmark
+python task_cont.py --repr param --aniso        # + edge length, + ink term
+```
+
+Reproducibility, honestly: Part I records cross-process nondeterminism in XLA
+reduction order large enough to change outcomes, and that applies here. Seed
+spread on `mnist` is about 0.013 nats, so treat any difference smaller than that
+as unresolved.
+
 ## The data the priors are literally true of
 
 A closed planar curve, resampled to `n` points of **equal arc length**. Then:

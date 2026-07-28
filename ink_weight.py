@@ -1,8 +1,11 @@
 """Does the error concentrate where the 'ink' is heavy? Stratify per-position
 NLL by LOCAL CURVATURE (|turning angle|), which is the intrinsic, origin-free
 analogue of stroke weight."""
-import sys, numpy as np, jax, jax.numpy as jnp, dataclasses
-sys.path.insert(0,'/home/user/semagram')
+import dataclasses
+
+import numpy as np
+import jax
+import jax.numpy as jnp
 import task_shape as T, loop_layer as L, contours as C, optax
 
 n, vocab, B = 48, 32, 512

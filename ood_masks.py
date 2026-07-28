@@ -3,8 +3,11 @@ occluded arc of length 6..18. An energy model defines a joint and should let you
 condition on an arbitrary subset; a feedforward masked model has to have seen
 the mask family. So: hold the number of hidden vertices at 12 and vary only the
 SHAPE of the conditioning set, out of distribution."""
-import sys, numpy as np, jax, jax.numpy as jnp, dataclasses
-sys.path.insert(0,'/home/user/semagram')
+import dataclasses
+
+import numpy as np
+import jax
+import jax.numpy as jnp
 import task_shape as T, loop_layer as L, contours as C
 
 n, vocab, B = 48, 32, 512
