@@ -385,6 +385,65 @@ What does survive is narrower than the recommendation was:
 - **Closure improves slightly** on identical data, 0.2098 against 0.2258.
 - **NLL gets clearly worse**, which is the metric the benchmark is about.
 
+## Result 10: content-dependent stiffness -- the one prediction that held
+
+The curvature stratification indicts the circulant prior specifically: it
+depends only on angular difference, so it applies one global smoothness to a
+curve that is smooth arcs punctuated by corners. `s_aniso` replaces that with a
+weighted Dirichlet energy whose weight is driven by CONTENT,
+
+    S_aniso = 0.5 * sum_i a(x_i) * ||x_{i+1} - x_i||^2,   a = softplus(w . rmsnorm(x_i) + b)
+
+which is Perona-Malik anisotropic diffusion written as an action: small `a` at a
+corner lets the state turn sharply, large `a` along an arc keeps the smoothing.
+Driving it from content rather than index is what keeps Result 1 intact --
+measured in float64, shift-equivariance is **5.75e-15** with the term on. An
+inhomogeneous prior that is still exactly origin-free. +65 parameters on 31906.
+
+**mnist, three seeds:**
+
+| | NLL | acc | closure | shift-equiv |
+|---|---|---|---|---|
+| `sema-so2` | 3.3970 +/- 0.0131 | 0.057 | 0.2258 | 5.2e-07 |
+| **`sema-ink`** | **3.3637 +/- 0.0042** | **0.062** | **0.2185** | 3.1e-07 |
+
+Seed-matched deltas -0.026, -0.024, -0.050: negative on every seed, mean
+**-0.033** against a baseline seed spread of 0.013, and the spread itself falls
+threefold. The largest and most consistent improvement in Part II.
+
+**And it improves where it was predicted to.** The prediction on record before
+the runs was "close the Q5 column and leave Q1 roughly alone" (seed 0):
+
+| model | Q1 (flat) | Q2 | Q3 | Q4 | Q5 (sharp) |
+|---|---|---|---|---|---|
+| `sema-so2` | 3.411 | 3.405 | 3.471 | 3.446 | 3.196 |
+| `sema-ink` | 3.399 | 3.396 | 3.452 | 3.425 | **3.131** |
+| improvement | -0.012 | -0.009 | -0.019 | -0.021 | **-0.065** |
+
+Monotone in curvature, and 5.4x larger at Q5 than at Q1. The mechanism helps
+exactly where the homogeneous prior was diagnosed as failing, which is the first
+pre-registered prediction in this file to survive contact after five that did
+not.
+
+Three things keep it in proportion.
+
+**It does not reproduce in the continuous setting.** On identical `--repr arc`
+data, adding the ink term makes things slightly worse -- cont-NLL -2.3548
+against -2.3673, closure 0.2154 against 0.2098. Single seed each, and the
+continuous head is a weaker model to begin with (Result 9), so this is not
+decisive either way. But a mechanism that helps a categorical head and hurts a
+continuous one on the same data is not yet understood, and it would be dishonest
+to report the categorical column alone.
+
+**It closes 15% of the gap it was aimed at.** The Q5 deficit against `tf-abs`
+goes from 0.420 to 0.355. Overall the layer remains 0.20 nats behind
+(3.364 against 3.167). This is a real mechanism with a small effect, not a
+repair.
+
+**The quintile table is one seed.** The aggregate is three; the stratification
+is seed 0 only, and given how much this file has been burned by single-seed
+readings that is worth stating rather than glossing.
+
 ## What was tried and did not work
 
 Each was a plausible mechanism, measured and dropped. The negative results were
@@ -1039,6 +1098,7 @@ dropped or replaced.
 | closing the variational gap unlocks test-time constraints | refuted: the near-stationary model responds *worse*; the blocker is the categorical readout |
 | a continuous head fixes the readout (recommended three times in this file) | refuted: 3.530 vs 3.397 in shared units, worse than the unigram -- a 2-parameter Gaussian is a weaker density than 32 free bins |
 | the edge-length channel gives the constraint a compliance direction | refuted: angle-locked closure moves <0.001; CV 0.084 is ~100x too thin for a 0.148 closure error |
+| the homogeneous circulant prior is what fails at corners | **supported** -- content-dependent stiffness gives -0.033 nats over 3 seeds, improving 5.4x more at Q5 than Q1, exactly as predicted; but does not reproduce with a continuous head |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |

@@ -17,7 +17,8 @@ q = np.quantile(np.abs(truth), [0.2,0.4,0.6,0.8])
 base = L.LoopCfg(n=n,d=64,heads=4,k_steps=8,modes=12,vocab=vocab,phi_dev=0.5)
 print(f"|turning| quintile edges: {np.round(q,3)}   (mean {np.abs(truth).mean():.3f})")
 print(f"{'model':10s}" + "".join(f"{'Q'+str(i+1):>9s}" for i in range(5)) + f"{'Q5-Q1':>9s}")
-for name, over in [("sema-so2",dict(gauge="so2")),("sema-su2",dict(gauge="su2")),
+for name, over in [("sema-so2",dict(gauge="so2")),("sema-ink",dict(gauge="so2",aniso=True)),
+                   ("sema-su2",dict(gauge="su2")),
                    ("tf-abs",None),("tf-ring",None)]:
     p = T.load_ckpt(f"mnist|{name}|s0")
     if p is None: continue
