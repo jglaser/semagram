@@ -317,6 +317,74 @@ though it fails as a route to a genuine energy model. Single seed at the time of
 writing, which is exactly the sort of claim this repository is supposed to
 distrust, so it is being replicated.
 
+## Result 9: the continuous head -- my own recommendation, refuted
+
+Results 4, 6 and 8 all end by recommending a continuous-valued head, on three
+separate grounds: the closure metric is mostly quantisation, the constraint
+moves a categorical's mean but never its mode, and the constraint's only lever
+is the content prediction itself. `task_cont.py` builds it and the
+recommendation does not survive contact.
+
+Two changes were being conflated, so `--repr` separates them. `arc` uses the
+IDENTICAL equal-arc-length turning angles the tokenised benchmark used,
+pre-quantisation, with length held constant -- only the head differs, so it
+isolates the TYPE change. `param` samples at uniform parameter and adds the edge
+length, i.e. the stroke channel.
+
+Scoring in the shared units integrates the predicted Gaussian over the same 32
+quantile bins and takes `-log P(true bin)`. Exact, and not a free win.
+
+| model, identical data | NLL in the 32-bin units |
+|---|---|
+| unigram | 3.466 |
+| Markov two-sided infill | 3.445 |
+| `sema-so2`, categorical head | **3.397** |
+| `sema-cont`, continuous head | **3.5295** |
+| `tf-abs` | 3.167 |
+
+**The continuous head is 0.13 nats worse than the categorical one, and worse
+than the unigram.** The reason is a property of the tokeniser I should have
+checked before recommending its removal three times: equal-frequency bins are
+NARROW where the density is high, about 0.012 rad near `d = 0`. A single
+Gaussian smears mass across many of those bins, so `P(correct bin)` is small,
+whereas 32 free bins can place mass exactly. On a sharply peaked, heavy-tailed
+angle distribution, distributional flexibility is worth more than the removal of
+quantisation error.
+
+So the corrected recommendation is not "go continuous" but **"get
+distributional flexibility"** -- a mixture density, a discretised logistic
+mixture, or the categorical kept with a within-bin offset. A two-parameter
+Gaussian was the wrong instantiation, chosen for convenience.
+
+**The compliance channel is refuted too.** The reason to want edge length was
+Result 8: with `(L, Phi)` per vertex there should be a null direction that
+closes the curve without moving the angles. `closure_energy_cont(lock_angle=True)`
+freezes the angles so only lengths can move:
+
+| `w` | closure, angles free | closure, **angles locked** |
+|---|---|---|
+| 0 | 0.1476 | -- |
+| 0.3 | 0.1907 | 0.1477 |
+| 1 | 0.2486 | 0.1479 |
+| 3 | 0.2838 | 0.1487 |
+
+Under 0.001 of movement at every weight. The arithmetic explains it and would
+have predicted it: a closure error of 0.148 means the curve misses by 0.148 of
+its perimeter, and repairing that through 12 free edges needs ~59% length
+changes against a learned log-length spread of CV 0.084. The null direction
+exists and is two orders of magnitude too thin to matter. "There is a
+compliance direction" and "the compliance direction is wide enough" are
+different claims and this file conflated them.
+
+What does survive is narrower than the recommendation was:
+
+- **The metric floor is gone.** True curves close to 0.004 (`arc`) and 0.000
+  (`param`) against the tokenised floor of 0.0714, on measured values near 0.22.
+  A third of every closure number in Part II was quantisation no model could get
+  under. Any future closure claim should use this representation.
+- **Closure improves slightly** on identical data, 0.2098 against 0.2258.
+- **NLL gets clearly worse**, which is the metric the benchmark is about.
+
 ## What was tried and did not work
 
 Each was a plausible mechanism, measured and dropped. The negative results were
@@ -919,6 +987,8 @@ dropped or replaced.
 | an energy model conditions on arbitrary subsets better than a masked one | refuted: on scattered/periodic masks `tf-abs` improves (-0.013) and Semagram degrades (+0.091) |
 | penalising `\|grad S\|` at the output makes the model its own minimiser | gamed above `w_stat` 0.1 -- the energy flattens under the output and the gap goes +0.329 -> +1.737 |
 | closing the variational gap unlocks test-time constraints | refuted: the near-stationary model responds *worse*; the blocker is the categorical readout |
+| a continuous head fixes the readout (recommended three times in this file) | refuted: 3.530 vs 3.397 in shared units, worse than the unigram -- a 2-parameter Gaussian is a weaker density than 32 free bins |
+| the edge-length channel gives the constraint a compliance direction | refuted: angle-locked closure moves <0.001; CV 0.084 is ~100x too thin for a 0.148 closure error |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
