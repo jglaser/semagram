@@ -424,6 +424,24 @@ braid does. `braid` -> `braid-ybe` is +0.058 and is the symmetry itself, since
 those two differ only by the Yang-Baxter penalty. So roughly 44% of the gain is
 Reidemeister invariance specifically rather than a better-shaped network.
 
+**The effect is causal, by dose-response.** Varying only the Yang-Baxter penalty
+weight, with everything else identical (seed 0):
+
+| `w_ybe` | YBE residual | test R2 | extrapolation R2 |
+|---|---|---|---|
+| 0 | 1.18e-01 | 0.644 | 0.141 |
+| 0.1 | 6.27e-02 | 0.651 | 0.153 |
+| 1 | 1.68e-02 | 0.683 | 0.199 |
+| 3 | 7.89e-03 | 0.699 | 0.213 |
+| 10 | 3.35e-03 | 0.700 | **0.225** |
+
+Monotone in both columns over a 35x range of residual, with
+`corr(log YBE residual, extrapolation R2) = -0.987`. The closer the learned maps
+come to satisfying the braid relation, the better the model generalises, and
+nothing else is varying. That is the evidence that the SYMMETRY is doing the
+work rather than the strand-shaped architecture around it -- at `w = 10` the
+extrapolation R2 is 7.8x the transformer's 0.029.
+
 **And the gain is concentrated where a correct inductive bias should put it.**
 In distribution, where data is plentiful, the built-in symmetry is worth 0.038;
 extrapolating beyond the training range it is worth 0.131. A prior earns its
