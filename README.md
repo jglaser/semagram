@@ -45,15 +45,23 @@ A braid on `s` strands is a word in generators `sigma_1 .. sigma_{s-1}` and
 their inverses. So the state is **one vector per strand**, `(batch, s, d)`, and
 a letter applies a learned map to the two strands it touches, leaving the rest
 alone. Reading the word left to right *is* the braid representation, with
-learned matrices where a physicist would put the R-matrix. The closure of a
-braid is a trace, so the readout pools over strands.
+learned matrices where a physicist would put the R-matrix.
+
+The readout mean-pools over strands, and **that is a known gap, not a trace.**
+A trace has `tr(ABC) = tr(BCA)`, which is conjugation invariance; mean pooling
+has no cyclic property at all. Since the target is a *closure* invariant and
+Markov's theorem says closure equivalence needs conjugation and stabilisation on
+top of the braid relations, the model is invariant under a strict subgroup of
+what the target respects. The dose-response below is the argument for fixing it:
+more of the right invariance bought more extrapolation up to `w = 10`, and
+conjugation is the next available dose.
 
 ```python
 x = broadcast(p["x0"], (b, s, d))              # one vector per strand
 for (i, sign) in word:                         # each letter of the braid
     pair   = x[:, i:i+2]                       # the two strands it touches
     x[:, i:i+2] = tanh(R[token] @ pair.flat)   # a learned 2-strand map
-return mlp(mean(x, axis=strands))              # closure = trace = pool
+return mlp(mean(x, axis=strands))              # pooled, NOT a trace -- see below
 ```
 
 The braid relation `R_i R_{i+1} R_i = R_{i+1} R_i R_{i+1}` is exactly the
@@ -75,7 +83,7 @@ fair comparisons.
 | `braid`, no penalty | 34.2k | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
 | `braid-ybe`, untied R | 34.2k | 0.681 +/- 0.005 | 0.186 +/- 0.012 |
 | **`braid-ybe`, tied R** | 29.4k | **0.760 +/- 0.005** | **0.269 +/- 0.015** |
-| **`braid-ybe`, tied R** | **13.4k** | 0.730 | **0.267** |
+| **`braid-ybe`, tied R** | **13.4k** | 0.730 +/- 0.001 | **0.267 +/- 0.000** (n=2) |
 
 ![In-distribution versus extrapolation](docs/fig3_extrapolation.svg)
 
@@ -88,8 +96,9 @@ buy nothing by themselves. Everything below is about the penalty.
 **Tying R is what makes the penalty mean anything.** With one map per sign
 applied at every position -- which is what a braid representation is -- the
 model reaches 0.269, and the `d = 32` version does the same at **13.4k
-parameters against the baseline's 40.3k**. The two widths agree to 0.002, so
-this is tying rather than capacity.
+parameters against the baseline's 40.3k**. The two widths land at 0.269 +/-
+0.015 (n=3) and 0.267 +/- 0.000 (n=2); the point is that halving the parameters
+costs nothing measurable, not that the gap is precisely 0.002.
 
 ## The mechanism, measured at every link
 
@@ -213,9 +222,14 @@ the target has nothing topological in it.
 | `braid-ybe` | **1.26e-07** | **1.000** | **1.000** |
 | `tf` | -- | 0.702 | 0.018 |
 
-Both braid variants solve it exactly and length-generalise perfectly; the
-transformer reaches 0.702 in distribution and then falls **below chance**
-(0.042) on longer words, having fitted length-specific features that mislead.
+Both braid variants solve it exactly and length-generalise perfectly.
+
+**The transformer row here is not usable and is left out deliberately.**
+`task_perm.py` was written before the baseline was corrected and still builds
+the learned-absolute-position model, whose rows `pos[10:16]` receive no
+gradient -- the same defect retracted two sections above. Quoting its collapse
+would mean relying on a baseline this file disowns. The braid rows stand on
+their own, since they are compared against each other.
 
 **Read this as weaker than it looks.** The task is an almost perfect
 architectural match -- the layer's state *is* the permutation state, so it needs
@@ -253,7 +267,7 @@ makes it a degenerate regression target.
 
 ## Honest limits
 
-- **Absolute extrapolation R2 is 0.225.** Every model here is poor at
+- **Absolute extrapolation R2 is 0.269.** Every model here is poor at
   generalising in crossing number; this compares degrees of failure, not a
   solved task.
 - **Three to four strands, lengths 4-16, one invariant, one architecture

@@ -113,7 +113,13 @@ def run(a):
             p = K.init_tf(key, vocab, lmax, 2, width, a.heads)
             p["out"] = jax.random.normal(key, (width, s * s)) / np.sqrt(width)
             p["bo"] = jnp.zeros((s * s,))
-            fwd = lambda p, x, m: K._pool(p, x, m, a.heads).reshape(-1, s, s)
+            # rotary, base tuned to sequence length -- the corrected baseline.
+            # Learned absolute positions leave rows pos[10:16] untrained, which
+            # is the defect retracted in the README.
+            rope = name != "tf-abs"
+            fwd = (lambda p, x, m, r=rope:
+                   K._pool(p, x, m, a.heads, not r, r, a.rope_base)
+                   .reshape(-1, s, s))
             def loss(p, x, m, y):
                 return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(
                     fwd(p, x, m), y))
@@ -163,7 +169,9 @@ def run(a):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="*", default=["braid", "braid-ybe", "tf"])
+    ap.add_argument("--models", nargs="*",
+                    default=["braid", "braid-ybe", "tf-rope"])
+    ap.add_argument("--rope-base", type=float, default=8.0)
     ap.add_argument("--train-n", type=int, default=20000)
     ap.add_argument("--test-n", type=int, default=2000)
     ap.add_argument("--lmin", type=int, default=4)
