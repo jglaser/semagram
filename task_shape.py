@@ -165,7 +165,7 @@ def closure_energy(p, cfg, centres, tokens, clamp, weight):
     return energy
 
 
-ENERGIES.update(close=closure_energy, turn=turn_energy)
+ENERGIES = dict(close=closure_energy, turn=turn_energy)
 
 
 # ----------------------------------------------------------------------------
@@ -210,9 +210,6 @@ def train_tf(key, data, vocab, n, steps, batch, lr, layers, width, heads, ring,
 
 # ----------------------------------------------------------------------------
 # evaluation
-
-ENERGIES = {}   # filled in below; keyed by constraint name
-
 
 def constrained_solve(p, cfg, toks, mask, centres, weights, sweeps, kind,
                       eta=None):
@@ -337,15 +334,58 @@ def references(d, te_tok, mask, centres):
 
     c = np.ones((vocab, vocab))
     np.add.at(c, (tr[:, :-1].ravel(), tr[:, 1:].ravel()), 1.0)
-    lp = np.log(c / c.sum(1, keepdims=True))
+    P = c / c.sum(1, keepdims=True)
+    lp = np.log(P)
     tt = np.asarray(te_tok)
     big = float(-lp[tt[:, :-1], tt[:, 1:]].mean())
+    mk = markov_infill(P, tt, np.asarray(mask))
 
     # The geometric floor: the closure error of the TRUE shape once it has been
     # pushed through the tokeniser. No model can do better than this, so it is
     # the number the constraint experiment has to be read against.
     floor = float(jnp.mean(closure_of(jnp.asarray(centres)[te_tok])))
-    return dict(unigram=uni, bigram=big, closure_floor=floor)
+    return dict(unigram=uni, bigram=big, markov_infill=mk, closure_floor=floor)
+
+
+def markov_infill(P, toks, mask):
+    """Exact two-sided infill posterior under a first-order Markov chain.
+
+    This is the reference the task actually needs, and the `bigram` number is
+    not it. `bigram` is next-token NLL with the whole left context observed,
+    over every position -- a different problem. Here a contiguous run of L
+    vertices is hidden between an observed `a` on the left and an observed `b`
+    on the right, and the honest classical answer is the posterior of the chain
+    conditioned on BOTH, which for offset k in the run is
+
+        p(x_k) ~ (P^k)[a, :] * (P^(L+1-k))[:, b]
+
+    exactly, by forward-backward on a chain. It is the strongest thing that
+    knows only pairwise statistics, and it uses the right-hand boundary
+    condition -- so it is the baseline a two-sided model has to beat in order
+    to have demonstrated anything beyond local smoothing.
+    """
+    V = P.shape[0]
+    pw = [np.eye(V)]
+    for _ in range(mask.shape[1] + 2):
+        pw.append(pw[-1] @ P)
+    tot, cnt = 0.0, 0
+    n = mask.shape[1]
+    for row, m in zip(toks, mask):
+        free = np.where(m == 0)[0]
+        if not len(free):
+            continue
+        # the eval masks are one contiguous arc; recover it on the ring
+        start = free[(np.diff(np.r_[free[-1] - n, free]) != 1).argmax()] \
+            if len(free) > 1 else free[0]
+        L = len(free)
+        a = row[(start - 1) % n]
+        b = row[(start + L) % n]
+        for k in range(1, L + 1):
+            post = pw[k][a] * pw[L + 1 - k][:, b]
+            post = post / post.sum()
+            tot += -np.log(post[row[(start + k - 1) % n]] + 1e-30)
+            cnt += 1
+    return float(tot / max(cnt, 1))
 
 
 # ----------------------------------------------------------------------------
@@ -502,8 +542,12 @@ def report(args):
         print("\n" + "=" * 78)
         print(f"{ds}  --  occluded-arc completion on real closed contours")
         print("=" * 78)
-        print(f"  references: unigram {r['unigram']:.3f} | neighbour-bigram "
-              f"{r['bigram']:.3f} | closure floor {r['closure_floor']:.4f}")
+        print(f"  references: unigram {r['unigram']:.3f} | Markov two-sided "
+              f"infill {r.get('markov_infill', float('nan')):.3f} | closure "
+              f"floor {r['closure_floor']:.4f}")
+        print(f"  (next-token bigram {r['bigram']:.3f} is a DIFFERENT task -- "
+              f"full left context at every position -- and is not the baseline "
+              f"here)")
         print(f"\n  {'model':16s} {'NLL':>14s} {'acc':>7s} {'closure':>9s} "
               f"{'shift-equiv':>12s} {'params':>8s}")
         for nm in names:
