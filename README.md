@@ -1114,6 +1114,7 @@ dropped or replaced.
 | closing the variational gap unlocks test-time constraints | refuted: the near-stationary model responds *worse*; the blocker is the categorical readout |
 | a continuous head fixes the readout (recommended three times in this file) | refuted: 3.530 vs 3.397 in shared units, worse than the unigram -- a 2-parameter Gaussian is a weaker density than 32 free bins |
 | the edge-length channel gives the constraint a compliance direction | refuted: angle-locked closure moves <0.001; CV 0.084 is ~100x too thin for a 0.148 closure error |
+| the solve has a period-3 phase structure, so K = 2 mod 3 should be a good readout point | refuted: 5.544 vs 5.632 across 3 seeds x 256 examples, and K=11 is among the worst (7.223). The "period" was three PD sweeps on one example -- a pattern read into three points |
 | the homogeneous circulant prior is what fails at corners | **supported** -- content-dependent stiffness gives -0.033 nats over 3 seeds, improving 5.4x more at Q5 than Q1, exactly as predicted; but does not reproduce with a continuous head |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
