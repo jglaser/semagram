@@ -180,7 +180,7 @@ def tf_forward(p, toks, mask, heads):
     return h[:, 0] * 0.0 + _pool(p, toks, mask, heads)
 
 
-def _rope(x, n):
+def _rope(x, n, base=10000.0):
     """Rotary positions: attention depends on i - j, so unseen absolute
     positions are not a problem. This is the FAIR baseline.
 
@@ -194,7 +194,13 @@ def _rope(x, n):
     half = dh // 2
     if half == 0:
         return x
-    freq = 1.0 / (10000.0 ** (np.arange(half) / half))
+    # `base` must suit the sequence length. The transformer default of 10000 is
+    # tuned for contexts of thousands: over n = 16 it gives total rotations of
+    # 15, 1.5, 0.15 and 0.015 radians, so three of four bands are nearly static
+    # and the encoding runs on one usable frequency. Comparing a braid layer
+    # against that is the same class of unfairness as the untrained
+    # absolute-position rows it replaced.
+    freq = 1.0 / (base ** (np.arange(half) / half))
     ang = np.arange(n)[:, None] * freq[None, :]
     c = jnp.asarray(np.cos(ang), x.dtype)[None, None]
     s = jnp.asarray(np.sin(ang), x.dtype)[None, None]
@@ -202,7 +208,7 @@ def _rope(x, n):
     return jnp.concatenate([x1 * c - x2 * s, x1 * s + x2 * c, rest], -1)
 
 
-def _pool(p, toks, mask, heads, use_pos=True, rope=False):
+def _pool(p, toks, mask, heads, use_pos=True, rope=False, rope_base=10000.0):
     """`use_pos=False` is the NoPE baseline, and it is not cosmetic.
 
     Training words are length 4-10 and extrapolation words 12-16, so rows
@@ -224,7 +230,7 @@ def _pool(p, toks, mask, heads, use_pos=True, rope=False):
         rs = lambda t: t.reshape(b, n, heads, dh).transpose(0, 2, 1, 3)
         qh, kh = rs(q), rs(k)
         if rope:
-            qh, kh = _rope(qh, n), _rope(kh, n)
+            qh, kh = _rope(qh, n, rope_base), _rope(kh, n, rope_base)
         att = jnp.einsum("bhid,bhjd->bhij", qh, kh) / np.sqrt(dh)
         att = jnp.where(mask[:, None, None, :] > 0, att, -1e9)
         o = jnp.einsum("bhij,bhjd->bhid", jax.nn.softmax(att, -1), rs(v))
@@ -291,7 +297,8 @@ def run(a):
             p = init_tf(key, vocab, lmax, layers, width, a.heads)
             use_pos = name not in ("tf-nope", "tf-rope")
             rope = (name == "tf-rope")
-            fwd = lambda p, x, m, u=use_pos, r=rope: _pool(p, x, m, a.heads, u, r)
+            fwd = (lambda p, x, m, u=use_pos, r=rope:
+                   _pool(p, x, m, a.heads, u, r, a.rope_base))
             def loss(p, x, m, y):
                 return mse(fwd(p, x, m), y)
         npar = sum(v.size for v in jax.tree.leaves(p))
@@ -355,6 +362,9 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-ybe", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rope-base", type=float, default=8.0,
+                    help="rotary base; 10000 is tuned for long contexts and "
+                         "wastes 3 of 4 bands at length 16")
     ap.add_argument("--tie-r", action="store_true",
                     help="one R per sign, applied at every position -- makes "
                          "ybe_residual genuinely Reidemeister III")
