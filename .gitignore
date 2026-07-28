@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Part II artefacts: downloaded corpora, checkpoints, run logs, result shards
+data/
+ckpt/
+logs/
+results*.json
+ablation.json
+input.txt
+*.svg
+
+# delivery artefacts (the patch bundle handed to the user)
+*.patch
+*.patch.tar.gz

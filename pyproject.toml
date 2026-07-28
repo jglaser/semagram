@@ -1,10 +1,13 @@
 [project]
 name = "semagram"
 version = "0.1.0"
-description = "Add your description here"
+description = "Circular attention as a boundary-value problem"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
-    "jax[cuda13]>=0.11.0",
-    "optax>=0.2.8",
+    "jax>=0.4.30",
+    "optax>=0.2.3",
+    "numpy>=1.26",
+    "scikit-image>=0.22",   # contours.py: marching-squares contour extraction
+    "scipy>=1.11",          # variational_gap.py / solver_probe.py: L-BFGS
 ]

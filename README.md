@@ -1,228 +1,196 @@
-# Semagram: circular attention as a boundary-value problem
+# Braided attention: a symmetry that is worth building in
 
-`semagram.py` is a single-file JAX demo of an attention architecture with three
-commitments, taken from the logograms in *Arrival*:
-
-1. **Tokens live on a circle.** No BOS, no EOS, no position 0. Attention that
-   depends only on angular difference is circulant, hence diagonal in the DFT
-   basis and applied in `O(n log n)` by `rfft`. A real spectral multiplier is an
-   even kernel, so reflection symmetry of the geometric prior is exact by
-   construction rather than learned.
-2. **The forward pass is a stationary point, not a stack.** An action `S[X]` is
-   defined over the whole loop and the layer solves `dS/dX = 0`, so attention is
-   literally `jax.grad(energy)`, the Jacobian is symmetric, and there is no
-   separate `V` matrix — value mixing falls out of differentiating log-sum-exp.
-3. **Ambiguity is holonomy.** Each edge carries an `SO(2)` transport per
-   2-plane; going once around the loop should return you to yourself, and the
-   closure residual measures how far a reading is from globally coherent.
+A sequence layer whose forward pass **is** a braid representation, and a
+benchmark where that pays off: predicting the Jones polynomial of a braid
+closure from its word. Against a parameter-matched transformer it generalises
+**3.4x better** past its training range, and the advantage tracks how closely
+the learned maps satisfy the Yang-Baxter equation.
 
 ```bash
-python semagram.py --task bridge      # synthetic BVP unit test, ~1 min
-python semagram.py --task text        # headline run + both baselines
-python semagram.py --diagnose         # four structural diagnostics
-python semagram.py --ablate --seeds 3 # leave-one-out over the structural flags
+python -m venv .venv && . .venv/bin/activate
+pip install "jax[cpu]" optax numpy scipy scikit-image
+
+python braids.py                                   # verify the invariants
+python task_knot.py                                # the benchmark, ~12 min CPU
+python task_knot.py --models braid-ybe --w-ybe 10  # the best setting
 ```
+
+CPU only, no GPU used anywhere.
+
+## The question, and why this is the right test of it
+
+Building a symmetry into an architecture is supposed to beat learning it from
+data. [`lessons.md`](lessons.md) is a long record of that failing: an earlier
+layer here imposed cyclic-shift equivariance **exactly** -- measured at 1.3e-15
+-- on data where the symmetry is literally true, and lost to a transformer with
+learned absolute position embeddings that is provably *wrong* about the geometry
+(its output moves 71% under a rotation with no geometric content).
+
+The diagnosis was that **cyclic shift is too easy a symmetry to matter**. A
+flexible model learns it from data more cheaply than a rigid one imposes it. If
+that is right it makes a prediction: find a symmetry with no cheap local
+statistic, and building it in should pay.
+
+Braid closures are that symmetry. Two braid words can present the same knot
+while looking nothing alike, deciding whether they do has no local shortcut, and
+the Jones polynomial is #P-hard in general -- but it is exactly what a
+Yang-Baxter R-matrix respects for free.
+
+## The layer
+
+A braid on `s` strands is a word in generators `sigma_1 .. sigma_{s-1}` and
+their inverses. So the state is **one vector per strand**, `(batch, s, d)`, and
+a letter applies a learned map to the two strands it touches, leaving the rest
+alone. Reading the word left to right *is* the braid representation, with
+learned matrices where a physicist would put the R-matrix. The closure of a
+braid is a trace, so the readout pools over strands.
+
+```python
+x = broadcast(p["x0"], (b, s, d))              # one vector per strand
+for (i, sign) in word:                         # each letter of the braid
+    pair   = x[:, i:i+2]                       # the two strands it touches
+    x[:, i:i+2] = tanh(R[token] @ pair.flat)   # a learned 2-strand map
+return mlp(mean(x, axis=strands))              # closure = trace = pool
+```
+
+The braid relation `R_i R_{i+1} R_i = R_{i+1} R_i R_{i+1}` is exactly the
+statement that the layer cannot distinguish two diagrams differing by a
+Reidemeister III move. `ybe_residual` measures the violation, and adding it to
+the loss with weight `w_ybe` is how the symmetry is imposed -- softly, which
+turns out to matter.
 
 ## Results
 
-`bridge` works, and for the reason the design predicts. `text` went from *worse
-than a unigram predictor* to a real character model, but does **not** match a
-parameter-matched bidirectional transformer.
+Three seeds, parameter-matched, trained on braid words of length 4-10 and tested
+on 12-16.
 
-4-char gap infill, 12 free positions, two-sided context, 20k steps, ~0.19M
-params (baselines +5.5%). References: unigram 3.309, bigram 2.482.
-
-| model | gap NLL | acc | gap-start NLL |
-|---|---|---|---|
-| **semagram** | **2.373** | 0.320 | 2.126 |
-| bidirectional transformer, same objective | 2.202 | 0.356 | 1.949 |
-| causal transformer, left context only | — | — | 1.514 |
-
-- **Uses context, clearly.** 2.373 beats the bigram table (2.482) and the
-  masked-arc score 2.959 beats unigram (3.309). The original code did neither.
-- **The right-hand boundary condition is worth +0.057 nats**, measured inside
-  one model at one position with identical left context (`boundary_masks`) —
-  the text analogue of `bridge`'s both-ends vs prefix-only split.
-- **It does not match the bidirectional baseline** (+0.171, target was 0.1).
-  Reported rather than tuned away.
-- The causal column varies objective *and* architecture at once and is not an
-  architecture result; read it against the bidir row, which holds the objective
-  fixed. Both masked models trail causal by ~0.5 nats, which is the masked
-  objective's sample-inefficiency, not the circular geometry.
-
-`bridge` (26-symbol step function, clamp the two adjacent endpoints, solve the
-interior): **both-ends 1.000, prefix-only 0.247, gap +0.753**. Nothing in the
-prefix reveals the second half, so a causal model is structurally incapable of
-it. This is the claim working.
-
-Qualitatively, gap infill went from blanks to English-shaped text:
-
-```
-true  And you,[ ][s][i][r]! you are [w][e][l][c]ome. Trave[l][ ][y][o]u far on
-pred  And you,[ ][a][o][d]! you are [a][e][ ][c]ome. Trave[ ][ ][y][o]u far on
-```
-
-The *endpoint* reconstruction is still mostly blank, and that is the metric
-rather than the model: predicting 36 Shakespeare characters from 12 has enormous
-conditional entropy and emitting the unigram mode is near CE-optimal there.
-
-## The failure, and what actually caused it
-
-Starting point: validation NLL stuck at **3.42**, worse than a context-free
-unigram predictor, decoding to blanks. Six causes, in descending order of how
-much they mattered:
-
-| cause | effect |
-|---|---|
-| readout had no bias and was untied — could not express a constant | gap 3.35 → 2.75 |
-| band limit applied to the signal, not the kernel | 1 usable Fourier mode of 25 |
-| weight decay on the tied readout | collapse at ~step 5000 |
-| nothing in the model broke reflection symmetry | bigram unrepresentable |
-| endpoint metric measured itself | unigram mode near-optimal |
-| connection initialised trivially | no positional signal at init |
-
-### The band limit was on the signal
-
-`spectral_multiplier` padded modes above `M` with `1e3`. In the preconditioned
-descent those modes are multiplied by `1 - eta*g/(g+1) ~ 1 - eta` every sweep, so
-after `K` sweeps they are gone. `d_spectrum` perturbs the free arc with white
-noise and reports the per-mode transfer: in-band to out-of-band gain ratio
-**1.3e6**, leaving **1 usable mode out of 25**. A free position could carry DC
-and nothing else — which is precisely a wall of spaces. The spec says band-limit
-the *kernel*; the state should keep full bandwidth.
-
-### Nothing broke reflection symmetry — and it was not Q=K tying
-
-The original tied `W_q = W_k`, justified as what makes the gradient
-conservative. That justification is false (any scalar has a conservative
-gradient). The obvious replacement claim — that tying makes the model
-reflection-blind — is *also* false. Tying does make the logit matrix exactly
-symmetric, but symmetric logits do not imply an equivariant model. Per 2-plane,
-
-```
-W^T R(dth) W = cos(dth) * (W^T W)  +  sin(dth) * (W^T J W)
-```
-
-and `W^T J W` is antisymmetric, nonzero, and odd in `dth`, so orientation
-survives tying — measured, `tied + flat` has reflection residual 0.19, and the
-ablation below shows tied models stay *directed* while still failing.
-
-What was actually wrong: *no term broke the symmetry*. The circulant kernel is
-even; `rmsnorm` and the Hopfield term are pointwise; and the content-dependent
-connection is covariant — reversing the loop reverses each transport — so it
-cannot break reflection however it is trained. With the flat base off, the whole
-solve is equivariant to **6e-15** in float64 regardless of `W_q`, `W_k`. It could
-not tell `th` from `ht` because there was nothing there to tell them apart with.
-
-The only term that can break it is a connection attached to the **ring** rather
-than the content, because that one does not reverse. That is the flat RoPE base,
-promoted from "nicer initialisation" to load-bearing.
-
-## Ablation
-
-Leave-one-out from the best config, plus the full `tied × flat` 2×2 because
-that is the one place an interaction was plausible. 3 seeds, 4000 steps,
-`python semagram.py --ablate --seeds 3`. `refl` is the isolated reflection
-residual: **~1e-4 means the model is provably blind to the direction of the
-loop**, ~1e-2 and above means it is directed.
-
-| config | gap NLL | gap acc | refl | Δ vs best |
+| model | params | YBE residual | test R2 | extrapolation R2 |
 |---|---|---|---|---|
-| **best** | **2.625 ± 0.013** | 0.278 | 3.3e-02 | — |
-| `soft_clamp` (λ=0.5) | 2.648 ± 0.018 | 0.274 | 4.0e-01 | +0.023 |
-| `band_pad=1e3` | 2.828 ± 0.018 | 0.242 | 1.2e-01 | +0.204 |
-| `no-flat` | 3.091 ± 0.027 | 0.179 | **1.6e-04** | +0.466 |
-| `tied` | 3.121 ± 0.035 | 0.186 | 4.6e-02 | +0.496 |
-| `as-shipped` | 3.219 ± 0.191 | 0.162 | 1.1e-02 | +0.594 |
-| `tied+no-flat` | 3.220 ± 0.017 | 0.161 | **4.5e-04** | +0.595 |
+| `braid` | 34.2k | 1.15e-01 | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
+| **`braid-ybe`** | 34.2k | **1.66e-02** | **0.681 +/- 0.005** | **0.186 +/- 0.012** |
+| `tf` (transformer) | 32.8k | -- | 0.643 +/- 0.008 | 0.055 +/- 0.028 |
 
-Reading the table:
+Seed-matched extrapolation deltas against the transformer are +0.170, +0.148,
++0.076: positive on every seed, mean **+0.131**, a 3.4x ratio.
 
-- **`tied` and `no-flat` cost about the same (+0.50, +0.47) for different
-  reasons**, and the `refl` column separates them. `no-flat` is reflection-blind
-  (1.6e-04); `tied` stays firmly **directed** (4.6e-02) and fails anyway. So
-  untying was the right call for the reason `old/semagram.py:132` gave — the
-  channel map `W_q^T W_k` vs a symmetric `W^T W` — and *not* for the
-  symmetry reason this file originally claimed. The two effects are separable
-  and roughly additive (`tied+no-flat`, +0.595).
-- **No interaction worth the name.** +0.496 and +0.466 individually, +0.595
-  together, well short of additive. These are two independent handicaps, not a
-  crossing.
-- `soft_clamp` is inside noise (+0.023) but drives the closure residual to 0.40,
-  i.e. it buys nothing and destroys the holonomy's interpretability.
-- `as-shipped` has by far the **largest seed variance** (±0.191): one seed
-  reached 2.949 and two collapsed outright. The original configuration was not
-  merely bad, it was unstable.
+**The advantage splits in two and both halves are measured.** `tf` -> `braid` is
++0.073, the architecture matching the generative process. `braid` ->
+`braid-ybe` is +0.058, the symmetry itself -- those two are the same network and
+differ only by the penalty. So about 44% of the gain is Reidemeister invariance
+specifically.
 
-## Stability
+**It is causal, by dose-response.** Varying only `w_ybe`, seed 0:
 
-The unigram is an **absorbing state** — flat readout, uninformative solved
-state, no gradient back out. At `lr=3e-3` the model is bistable about it: the
-same seed with byte-identical code reached gap NLL **2.356** in one run and
-**3.333** in another, separating between steps 4000 and 5000 through
-floating-point nondeterminism alone. That is the reproducibility warning in the
-modular-arithmetic section below, in a sharper form: not 4 percentage points,
-but the difference between working and not.
+| `w_ybe` | YBE residual | test R2 | extrapolation R2 |
+|---|---|---|---|
+| 0 | 1.18e-01 | 0.644 | 0.141 |
+| 0.1 | 6.27e-02 | 0.651 | 0.153 |
+| 1 | 1.68e-02 | 0.683 | 0.199 |
+| 3 | 7.89e-03 | 0.699 | 0.213 |
+| **10** | 3.35e-03 | **0.700** | **0.225** |
+| 30 | 1.15e-03 | 0.682 | 0.208 |
+| 100 | 2.90e-04 | 0.664 | 0.190 |
 
-The nondeterminism is strictly **cross-process**: the ablation grid ran two
-configurations that turned out to be identical (`hard_clamp=True` is already the
-default) and they agreed to every printed digit, 2.643/2.643 and 2.611/2.611,
-seed for seed. Within one process this is reproducible; across processes, XLA
-reduction order is enough to change the outcome. `as-shipped` shows the same
-bistability at 4000 steps (±0.191 across seeds: one run at 2.949, two
-collapsed), so this is a property of the original design, not something the
-fixes introduced.
+Up to `w = 10` this is monotone across a 35x range of residual,
+`corr(log residual, extrapolation R2) = -0.987`, with nothing else varying. At
+the peak it is **7.8x** the transformer.
 
-The default `lr` is therefore `2e-3`, which has not been observed to collapse
-and scores better anyway. `main_text` prints a `COLLAPSED` banner rather than
-tabulating a degenerate run as an architecture result.
+**Then it turns over, which is the more interesting half.**
 
-## What was tried and did not work
+```
+soft (0.225)  >  exact (0.190)  >  none (0.141)  >>  transformer (0.029)
+```
 
-Each was a plausible mechanism, measured and dropped. The negative results were
-most of the work.
+Every level of the symmetry beats having none and all of them beat the
+transformer, but **approximate invariance beats exact invariance**. Yang-Baxter
+solutions are a measure-zero variety; forcing the learned maps exactly onto it
+removes capacity the model needs for fitting.
 
-| hypothesis | measured |
-|---|---|
-| Q=K tying makes the model reflection-blind | residual 0.19 — directed; refuted |
-| gradient clipping fixes the collapse | 4.415 vs 2.639, and collapses *sooner* |
-| the solver contracts too hard, wasting the unroll | `g_floor` 0.1: 2.642 vs 2.584 |
-| the unroll needs more depth | `k_steps` 16: 2.683 vs 2.584 |
-| hard clamping blocks contextualisation | soft clamp 2.580 vs 2.560; catastrophic above `lam~1` |
-| the peaked tied readout needs scaling down | collapses to unigram immediately |
-| a saturating gauge phase causes the collapse | neutral across `phi_dev` 0.0–1.0 |
+And that is the sentence the whole project has been circling. The earlier layer
+imposed its symmetries *exactly* and they were worth nothing. Exactness was
+never the axis. A symmetry has to be **hard enough to be worth having** --
+Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
+behind**.
 
-The last row deserves its own note: `phi_dev=0.0` removes the content-dependent
-connection *entirely* and costs nothing (2.472 vs 2.462 at `1.0`). **The
-"ambiguity is holonomy" mechanism earns nothing measurable on this task**; the
-fixed flat base does the work. It is kept, bounded at 0.1, because it keeps the
-winding numbers interpretable at no measured cost — not because it was shown to
-help.
+## Does it work away from knots?
 
-## Diagnostics
+`task_perm.py` is the cheapest control: same layer, same tokens, same
+train-short/test-long protocol, no topology. The word is a sequence of adjacent
+transpositions and the target is the permutation they compose to. The braid
+relation is the Coxeter relation, so Yang-Baxter is exactly true here too, while
+the target has nothing topological in it.
 
-`python semagram.py --diagnose` runs four checks against untrained models in
-four configurations. Each targets one structural claim and each can refute it.
+| model | YBE residual | test | extrapolation |
+|---|---|---|---|
+| `braid` | 3.27e-02 | **1.000** | **1.000** |
+| `braid-ybe` | **1.26e-07** | **1.000** | **1.000** |
+| `tf` | -- | 0.702 | 0.018 |
 
-- `d_spectrum` — per-mode transfer of the solver on the free arc.
-- `d_reflection` — is the solve equivariant to reversing the loop? Reported
-  twice: as-is (nonzero even when blind, because a connection with holonomy has
-  a branch cut at the gauge origin) and with the content phase zeroed, which
-  isolates the structural question.
-- `d_clamp_echo` — can a given token survive the solve, and does it ever become
-  contextual?
-- `d_residual` — stationarity residual per sweep.
+Both braid variants solve it exactly and length-generalise perfectly; the
+transformer reaches 0.702 in distribution and then falls **below chance**
+(0.042) on longer words, having fitted length-specific features that mislead.
+
+**Read this as weaker than it looks.** The task is an almost perfect
+architectural match -- the layer's state *is* the permutation state, so it needs
+only to learn "swap these two vectors", after which length-generalisation is
+free because the layer is a recurrence. Both variants sit at 100%, so there is
+no headroom to separate the symmetry from the architecture, which was the
+question worth asking. It confirms that the advantage is not knot-specific; it
+does not establish that the SYMMETRY generalises, and the knot benchmark remains
+the only measurement where that contribution is isolated.
+
+One detail worth keeping: `braid-ybe` drove its Yang-Baxter residual to 1.26e-07
+here, against 1.66e-02 on knots. The learned maps became near-exact braid
+representations on their own when the task permitted it.
+
+## The ground truth is verified two independent ways
+
+Because the previous benchmark's lesson was that the benchmark is usually where
+the bug is. `braids.py` computes the Jones polynomial by
+
+- **state sum**: all `2^L` Kauffman resolutions, loops counted by union-find.
+  Obviously correct, and 6.5 s per braid at length 16.
+- **Temperley-Lieb transfer**: a vector over non-crossing matchings of `2s`
+  points (Catalan-many -- verified at 2, 5, 14, 42 for `s` = 2..5), so a word
+  becomes a product of small matrices.
+
+**0 mismatches in 150 comparisons, 27712x faster** (0.23 ms at length 16), and
+both agree with the published trefoil and figure-eight polynomials.
+
+Three bugs surfaced before any of it was used: `sigma_1^3` closes to the
+*left*-handed trefoil under this sign convention (the figure-eight is
+amphichiral, so it passed either way and hid this); evaluation points off the
+unit circle are unusable, `|V|` reaching 1123 against a median of 1.0; and at
+`t = exp(2 pi i/3)` the Jones polynomial has modulus 1 for **every** knot, which
+makes it a degenerate regression target.
 
 ## Honest limits
 
-- **The solver is not a solver.** `SOLVER="descent"` is a truncated,
-  preconditioned unroll whose iteration matrix has spectral radius > 1 for every
-  step size, because `-logsumexp` of a quadratic form supplies genuine negative
-  curvature. It is a weight-tied K-sweep network parameterised by an energy —
-  not a DEQ, and implicit differentiation would be unsound for it.
-- **The energy formulation forces a tied FFN.** A conservative gradient needs a
-  symmetric Hessian, so the Hopfield term's `w2` must equal `w1^T`. That is a
-  real expressivity cost of the framing, not an implementation choice.
-- Headline numbers are single-seed; the ablation uses 3 seeds.
-- `n=48`, `d=160`, 20k steps. Everything here is small.
+- **Absolute extrapolation R2 is 0.225.** Every model here is poor at
+  generalising in crossing number; this compares degrees of failure, not a
+  solved task.
+- **Three to four strands, lengths 4-16, one invariant, one architecture
+  family.** The braid-vs-transformer result is replicated over three seeds; the
+  **dose-response sweep is single-seed**, and the peak-versus-endpoint
+  differences (0.017-0.035) sit against a three-seed spread of 0.012, so the
+  turnover is suggestive rather than established.
+- **The optimum is one number on one setup.** Whether the best residual is fixed
+  or scales with capacity or data is untested, and a fixed optimum would be a
+  far stronger claim than this.
 
+## Files
+
+| file | what it is |
+|---|---|
+| `braids.py` | braid words, knot closures, exact Jones polynomials (two ways) |
+| `task_knot.py` | the braided layer, the Yang-Baxter penalty, the transformer baseline |
+| `lessons.md` | the two earlier architectures and why they failed |
+| `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |
+| `contours.py`, `task_shape.py`, `task_cont.py` | the earlier closed-contour benchmark |
+| `variational_gap.py`, `ood_masks.py`, `ink_weight.py`, `solver_probe.py` | diagnostics from that work, several of them reusable |
+
+The single most portable thing to come out of the earlier work is
+`variational_gap.py`: **minimise your action and see whether the model gets
+worse.** If it does, the variational structure is bookkeeping -- a recurrence
+that an energy happened to generate, rather than a model that solves a
+variational problem.
