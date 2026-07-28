@@ -185,10 +185,15 @@ def mse(pred, y):
 def run(a):
     print("building exact Jones targets (state sum, verified against the "
           "literature) ...", flush=True)
-    Wtr, Ytr, Str, Ltr = B.build(a.train_n, len_range=(a.lmin, a.lmax), seed=1)
-    Wte, Yte, Ste, Lte = B.build(a.test_n, len_range=(a.lmin, a.lmax), seed=2)
+    Wtr, Ytr, Str, Ltr = B.build(a.train_n, len_range=(a.lmin, a.lmax), seed=1,
+                                 pure=a.pure)
+    Wte, Yte, Ste, Lte = B.build(a.test_n, len_range=(a.lmin, a.lmax), seed=2,
+                                 pure=a.pure)
     Wex, Yex, Sex, Lex = B.build(a.test_n, len_range=(a.lmax + 2, a.lmax + 6),
-                                 seed=3)
+                                 seed=3, pure=a.pure)
+    if a.pure:
+        print("PURE BRAIDS ONLY: every word has the identity permutation, so "
+              "strand tracking carries no information", flush=True)
     smax, lmax = 4, a.lmax + 6
     vocab = B.VOCAB(smax)
     mu, sd = Ytr.mean(0), Ytr.std(0) + 1e-8
@@ -287,4 +292,6 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-ybe", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--pure", action="store_true",
+                    help="restrict to pure braids (identity permutation)")
     run(ap.parse_args())
