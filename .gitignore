@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Part II artefacts: downloaded corpora, checkpoints, run logs, result shards
+data/
+ckpt/
+logs/
+results*.json
+ablation.json
+input.txt
+*.svg
