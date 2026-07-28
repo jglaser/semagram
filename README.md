@@ -185,6 +185,76 @@ The default `lr` is therefore `2e-3`, which has not been observed to collapse
 and scores better anyway. `main_text` prints a `COLLAPSED` banner rather than
 tabulating a degenerate run as an architecture result.
 
+## Result 7: when would the variational principle be relevant?
+
+Every model here saw exactly one conditioning family in training: a single
+contiguous occluded arc of length 6..18. An energy defines a *joint*, so
+conditioning on an arbitrary subset should be free; a feedforward masked model
+has to have seen the mask family. That is the most-cited practical advantage of
+the framing, so it is worth testing directly. `ood_masks.py` holds the number of
+hidden vertices at 12 and varies only the SHAPE of the conditioning set.
+
+| model | contiguous 12 (in-dist) | two arcs of 6 | scattered 12 | periodic every-4th | contiguous 30 |
+|---|---|---|---|---|---|
+| `sema-so2` | 3.397 | +0.002 | **+0.091** | +0.013 | +0.117 |
+| `sema-su2` | 3.383 | +0.003 | **+0.151** | +0.009 | +0.111 |
+| `tf-abs` | 3.172 | -0.009 | **-0.013** | -0.013 | +0.159 |
+| `tf-ring` | 3.184 | +0.067 | +0.087 | +0.091 | +0.279 |
+
+The scattered and periodic columns are the diagnostic, and they are *easier*
+problems than the one trained on: every hidden vertex sits between two observed
+ones. A model that genuinely solves the boundary-value problem should improve
+there. `tf-abs` does, 3.172 -> 3.160. Semagram gets **worse**, 3.397 -> 3.488.
+On the most favourable conditioning geometry available, the boundary-value
+framing moves the wrong way.
+
+That is the fourth predicted advantage to fail, after accuracy on matched priors
+(Result 3), constraint composition (Result 4), and the directed-convolution
+prohibition being worth 0.002 nats (Result 6). So the question is worth asking
+properly: under what conditions *would* a variational forward pass earn its
+keep? Three, and the first two are prerequisites rather than benefits.
+
+**1. The forward pass has to actually be `argmin S`.** Result 5 shows it is not:
+training backprops through a truncated unroll, the network learns the
+truncation, and the energy ends up as the generator of an update rule rather
+than an objective. Every downstream property -- the `‖∇S‖` certificate, the CG
+backward pass, constraint composition -- is unavailable until this holds, and
+the fix is training through a converged fixed point, not a better inference-time
+solver.
+
+**2. The energy's minimum has to be what you want.** Even fully converged,
+minimising this action costs 0.33 nats against the unroll. Implicit
+differentiation is what would make the minimiser good, because it is the only
+setup in which the gradient reaches the energy *as* an energy.
+
+**3. The varying part of the inference problem has to be inexpressible as a
+mask.** This is where the usual pitch is weakest, and the table above is why.
+"Condition on an arbitrary subset of the same variables" is precisely what
+masked training already teaches, which is why `tf-abs` shrugs off mask shapes it
+never saw. It is not a moat.
+
+What has no feedforward analogue, and would justify the machinery:
+
+- **Composing independently-trained energies.** `S_1 + S_2` from two separately
+  trained models is a valid joint; two masked transformers cannot be added. This
+  is the actual EBM superpower -- product of experts, compositional generation
+  -- and it requires a converged solve.
+- **Constraints with no mask expression at all**: hard physical laws, symbolic
+  conditions, conservation statements, anything not of the form "observe these
+  variables".
+- **Instance-adaptive compute**, spending solver iterations where a particular
+  input is hard.
+
+Multimodality can be struck off the list for this energy specifically: L-BFGS
+from two very different starts reached the same minimum to seven digits, so
+there are no basins here for "ambiguity is holonomy" to bifurcate between.
+
+The portable result is a diagnostic, and it is cheap: **minimise your action
+properly and see whether the model gets better or worse.** If worse, the
+variational structure is bookkeeping -- a recurrence that an energy happened to
+generate, rather than a model that solves a variational problem. Running that
+one test first would have saved this architecture a great deal of theory.
+
 ## What was tried and did not work
 
 Each was a plausible mechanism, measured and dropped. The negative results were
@@ -784,6 +854,7 @@ dropped or replaced.
 | the concave-convex splitting CCCP needs | the attention term has 98.4% positive eigenvalues in `x`; concave only for FIXED keys |
 | negative curvature is what stops the solve converging (my own Result 4 claim) | refuted -- the Hessian at the minimum is PD, +5.69 to +2304 |
 | the even-kernel prohibition is what the layer needs most | a scalar action provably cannot express a directed convolution (verified 2e-16), and handing it one anyway is worth -0.002 nats against a 0.013 seed spread |
+| an energy model conditions on arbitrary subsets better than a masked one | refuted: on scattered/periodic masks `tf-abs` improves (-0.013) and Semagram degrades (+0.091) |
 | sample the contour at `n` points directly | a sampled fractal: `\|d\|` mean 0.44 rad vs 0.13 expected |
 | close the `su2` holonomy by subtracting `log(H)/n` per edge | does not converge; the correction does not commute with what it corrects |
 | `2*arccos\|Re H\|` for the `su2` holonomy | `nan` on step 1 -- infinite derivative at the identity, where init sits |
