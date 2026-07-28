@@ -512,6 +512,268 @@ unit circle are unusable, `|V|` reaching 1123 against a median of 1.0; and at
 `t = exp(2 pi i/3)` the Jones polynomial has modulus 1 for **every** knot, which
 makes it a degenerate regression target.
 
+## Beyond knots: quantum circuits
+
+The braid result could be about knots. This is the same layer, unchanged, on a
+different subject with a different symmetry -- and the point of running it is
+that the symmetry here is *weaker*, so it is a test of the idea rather than a
+victory lap.
+
+**The analogy is exact, not loose.** A circuit on `n` qubits is a sequence of
+two-qubit gates on adjacent pairs; a braid word on `n` strands is a sequence of
+generators on adjacent pairs. Qubits are strands, gates are generators, depth is
+word length, qubit count is strand count. The layer holds one map per GATE TYPE
+and lifts it wherever the gate acts, exactly as tying held one map per sign.
+
+**The ground truth is exact.** `circuits.py` does statevector simulation: an
+`n`-qubit state is `2^n` complex numbers, and a two-qubit gate is applied by
+reshaping to `(2^i, 4, 2^(n-i-2))`, multiplying by the 4x4 gate matrix, and
+reshaping back. For `n <= 6` that is 64 numbers and there is no approximation
+anywhere. Every qubit starts in `Ry(pi/4)|0>` -- a superposition, so nothing
+sits at a trivial +-1 -- and the target is `<Z_i>` for each qubit, a real number
+in `[-1, 1]` that depends on everything qubit `i` interacted with, directly or
+through a chain.
+
+**The symmetry is different, and weaker.** Quantum gates do NOT satisfy
+`sigma_i sigma_{i+1} sigma_i = sigma_{i+1} sigma_i sigma_{i+1}`, so the
+Yang-Baxter penalty is not imported here. What both structures share exactly is
+FAR COMMUTATION: gates on disjoint pairs commute, `G_i G_j = G_j G_i` for
+`|i - j| >= 2`. The layer has it structurally -- a gate reads and writes only
+two slots -- and the transformer must learn it.
+
+### Results, three seeds
+
+| model | params | commute | depth 12-18 | in dist | 5 qubits | 6 qubits |
+|---|---|---|---|---|---|---|
+| **braid** (tied) | **16.9k** | **0.000** | **0.893 +/- 0.002** | **0.991** | **0.988** | **0.987** |
+| `braid-untied` | 83.4k | 0.000 | 0.859 +/- 0.006 | 0.986 | -1.29 +/- 1.00 | -1.77 +/- 1.07 |
+| `tf-pool`, base 200 | 15.8k | 0.700 | **0.205 +/- 0.009** | 0.602 | *-26.7* | *-30.0* |
+| `tf-pool`, base 8 | 15.8k | 0.650 | 0.186 +/- 0.032 | 0.618 | *-25.9* | *-26.7* |
+| `tf-rope` (per-qubit) | 16.1k | 0.893 | -0.023 +/- 0.052 | 0.529 | *-0.44* | *-1.64* |
+
+**The baseline's rotary base is tuned on this task, not inherited.** Base 8 was
+tuned for length-16 braid words; circuits here run to length 18 and longer under
+`--scale-depth`, and carrying the number over untested would have understated
+the baseline on the one hyperparameter this project has already shown to matter.
+Sweeping it (single seed, depth extrapolation R2):
+
+| `rope_base` | 2 | 4 | **8** | 32 | **200** | 10000 |
+|---|---|---|---|---|---|---|
+| depth 12-18 | 0.169 | 0.138 | *0.149* | 0.197 | **0.207** | 0.162 |
+
+So base 200, and the baseline row above uses it: 0.205 +/- 0.009 over three
+seeds, better and tighter than base 8's 0.186 +/- 0.032. The headline moves from
+4.8x to **4.4x** at matched parameters, and that is the number to use.
+
+`commute` is the far-commutation ratio from `commute_probe.py`, described below.
+Italicised entries are not comparisons: a 6-qubit circuit contains gate tokens
+whose embedding rows never received a gradient, so the transformer is reading
+its input off random init there. The tied-versus-untied contrast in those
+columns is the real one, and it reproduces the strand result on an unrelated
+task -- **0.987 against -1.77**, at one fifth the parameters.
+
+### The invariance is exact, and it is structural
+
+`commute_probe.py` measures the symmetry directly, the way `rIII_probe.py` did
+for Reidemeister III. Circuit pairs differ by one gate swap: DISJOINT gates,
+which cannot change the answer, against OVERLAPPING gates, which must. The
+control is not optional -- without it a model collapsed toward a constant scores
+perfectly. Checked against the simulator before use: disjoint swaps move the
+truth by `0.0e+00`, overlapping by `9.1e-02`.
+
+On disjoint swaps the braid layer's outputs are **bitwise identical**, maximum
+absolute difference `0.0`, at random initialisation. Not approximately
+invariant and not trained into invariance -- a gate writes only two slots, so
+disjoint gates commute whatever the learned maps are. The transformer sits
+between 0.42 and 0.98.
+
+### A baseline fix that failed, and a confound that was not there
+
+On the braid PR I conceded that this gap was partly OUTPUT SHAPE rather than
+symmetry: the braid layer keeps a slot per qubit and the target is one number
+per qubit, while the transformer pools. The in-distribution gap, where
+extrapolation is not in play, looked like exactly that fingerprint.
+
+So the transformer was given the same shape -- `n_max` query tokens, one per
+qubit, each qubit's answer read from its own position. **It made the
+transformer worse**, over three seeds, in distribution (0.529 against 0.618)
+and at extrapolation (-0.023 against 0.186). Output shape was not what it was
+losing on. Both readouts are kept, and the stronger is the baseline, which is
+the rule that made `tf-rope` rather than `tf-nope` the baseline for knots.
+
+### Is it the symmetry, or just sequential depth?
+
+A second explanation has nothing to do with symmetry. Predicting `<Z_i>` is a
+sequential computation of depth equal to the circuit depth, and the braid layer
+is a sequential state machine of exactly that depth -- one step per gate --
+while a 2-layer transformer has two rounds of attention however wide it is. If
+that were binding, the finding would be "the architecture matches the
+computation": real, but ordinary.
+
+The two are separable. If it is depth, adding LAYERS closes the gap and adding
+width does not. If it is the symmetry, neither does, because no amount of
+capacity makes a model exactly invariant. `tf_capacity.py` sweeps both:
+
+| model | params | commute | depth 12-18 | in dist |
+|---|---|---|---|---|
+| **braid** | **16.9k** | **0.000** | **0.893** | **0.992** |
+| tf 2L w24 | 15.6k | 0.702 | 0.150 | 0.621 |
+| tf 4L w16 | 13.7k | 0.881 | 0.150 | 0.518 |
+| tf 8L w16 | 26.3k | 0.866 | 0.135 | 0.527 |
+| tf 12L w8 | 10.2k | 0.982 | 0.101 | 0.328 |
+| tf 4L w40 (4x) | 80.2k | 0.504 | 0.221 | 0.767 |
+| tf 8L w24 (4x) | 57.8k | 0.575 | 0.193 | 0.687 |
+| tf 8L w56 (16x) | 306.9k | 0.546 | 0.186 | 0.777 |
+| tf 4L w40, 4x steps | 80.2k | 0.437 | 0.153 | 0.851 |
+| **tf 8L w56, 4x steps** | **306.9k** | 0.417 | **0.243** | 0.864 |
+
+**Depth is not the binding constraint.** The clean comparison is inside the
+table and needs no caveat: `tf 4L w16` (13.7k, 0.150) against `tf 8L w16`
+(26.3k, 0.135) -- **same width, double the depth, twice the parameters, no
+gain**. The full 2/4/8/12 ladder points the same way (0.150, 0.150, 0.135,
+0.101) but spans 10.2k-26.3k parameters, so "matched" is loose by 2.6x there
+and the deepest row is also the smallest; the same-width pair is the one the
+conclusion rests on.
+
+**Capacity is not either, for the thing that matters.** Eighteen times the
+parameters and four times the training buys a great deal IN DISTRIBUTION,
+0.621 -> 0.864, and almost nothing at extrapolation, 0.150 -> 0.243. The
+braid layer reaches **0.893 with 16.9k parameters**, so it beats the best
+transformer found anywhere in this sweep by **3.7x** while being 18x smaller.
+(Re-run at the tuned rotary base the 16x configuration gives 0.240 rather than
+0.243, so tuning does not rescue it either.)
+
+The undertraining objection is answered rather than waved off: quadrupling the
+step budget was run explicitly. At 4x parameters it made the model *better* in
+distribution (0.767 -> 0.851) and *worse* at extrapolation (0.221 -> 0.153) --
+the signature of fitting length-specific features rather than the symmetry.
+
+Also worth stating which way the 3.7x is selected: it compares a **three-seed
+mean** for the braid layer against the **maximum over ten single-seed**
+transformer configurations. Taking a maximum over configurations favours the
+transformer, so the number is conservative rather than cherry-picked.
+
+### The mechanism claim was mine, and it is wrong
+
+This section previously reported
+`corr(far-commutation ratio, depth extrapolation) = -0.812` across the nine
+transformers above, and read it as "the models that accidentally learn more of
+the symmetry extrapolate better". **That reading does not survive a control.**
+Capacity varies across that sweep and predicts both variables:
+
+| relationship | r | p |
+|---|---|---|
+| commute ratio vs extrapolation | -0.812 | 0.008 |
+| log(params) vs extrapolation | +0.799 | 0.010 |
+| log(params) vs commute ratio | -0.852 | 0.004 |
+| **partial**, commute vs extrapolation given log(params) | **-0.418** | **0.263** |
+
+Control for capacity and half the relationship disappears and significance goes
+with it. Bigger models are both more invariant and better at extrapolating, and
+an observational sweep cannot say which drives which. The knot dose-response did
+not have this problem because it was an **intervention**: vary `w_ybe` with
+capacity fixed, so the symmetry is the only thing moving.
+
+So `commute_dose.py` runs the intervention here. One architecture, 80,186
+parameters, nothing varying but a penalty pushing the transformer toward far
+commutation on unlabelled disjoint-swap pairs -- pairs that carry the symmetry
+and no information about the target. Two seeds:
+
+| `w_commute` | commute ratio | depth 12-18 | in dist |
+|---|---|---|---|
+| 0 | 0.542 +/- 0.056 | 0.221 +/- 0.001 | 0.764 +/- 0.004 |
+| 1 | 0.475 +/- 0.070 | 0.224 +/- 0.010 | 0.774 +/- 0.010 |
+| 10 | 0.356 +/- 0.040 | 0.196 +/- 0.010 | 0.719 +/- 0.052 |
+| 100 | 0.345 +/- 0.104 | 0.149 +/- 0.013 | 0.467 +/- 0.057 |
+
+**The penalty works and the extrapolation does not follow.** Invariance improves
+monotonically, 0.542 to 0.345, while extrapolation is flat to `w = 1` and then
+declines. Across the dose, at identical capacity,
+`corr(commute ratio, depth extrapolation) = +0.809` -- **the opposite sign** from
+the observational -0.812.
+
+So far commutation is **not** the mechanism behind the circuit gap, and the
+correlation this section used to quote was capacity all along. What survives is
+the weaker statement, which the commute column shows directly and needs no
+correlation: the transformer never reaches the invariance the architecture has
+for free.
+
+**This cuts with the project's thesis rather than against it.** On knots,
+intervening on Reidemeister III raised extrapolation monotonically to `w = 10`.
+Here, intervening on far commutation raises invariance and buys nothing. The
+difference is the one this repo keeps finding: R-III is hard and has no cheap
+local statistic, while far commutation is easy -- the transformer reaches 0.54
+unaided, and closing the remaining distance is worth nothing. An easy symmetry
+is not worth building in, which is exactly what the cyclic-shift failure in
+[`lessons.md`](lessons.md) said.
+
+**Then what does explain the circuit gap?** Not depth, not capacity, not far
+commutation -- all three are ruled out above. What is left is that the layer
+carries one vector per qubit and updates it one gate at a time, which is the
+shape of the computation the target comes from. That is an architectural match
+rather than a symmetry, it is a weaker and more ordinary claim than the knot
+result, and this benchmark does not isolate it. It is stated as the remaining
+hypothesis, not as a finding.
+
+### Does data close it?
+
+The same question the braid work had to answer. One seed per point, `tf-pool`
+as the stronger readout:
+
+| train circuits | braid | `tf-pool` | difference | ratio |
+|---|---|---|---|---|
+| 2,000 | 0.418 | 0.051 | 0.367 | 8.20 |
+| 6,000 | 0.820 | 0.140 | 0.680 | 5.86 |
+| 20,000 | 0.893 | 0.149 | 0.744 | 5.99 |
+| 60,000 | **0.910** | 0.164 | **0.746** | 5.55 |
+
+**The ratio narrows and the difference does not.** Both readings belong here.
+Over a 30x data range the ratio falls 8.20 -> 5.55, so the transformer is
+closing ground in proportional terms; but the difference grows 0.367 -> 0.746
+and then flattens, because the braid layer saturates near its ceiling (0.910)
+while the transformer creeps from 0.149 to 0.164. A ratio against a small
+denominator is the unstable statistic -- the lesson from the braid scaling
+section, where a single-seed ratio jump turned out to be a thousandth of
+movement in the denominator -- so the difference is the one to read, and it
+says the transformer gains almost nothing at extrapolation from 3x more data.
+
+This is a weaker anti-scaling result than the braid one, where the ratio held
+flat at ~1.8 across a 9x range. Here it declines. Extrapolating the trend, the
+gap would still be large at any data scale reachable this way, but the honest
+statement is that these four points do not rule out a slow close, and each is
+a single seed.
+
+### What this does not show
+
+The layer carries one vector per qubit. A real quantum state is entangled
+across `2^n` dimensions and does not factor that way, so this layer **cannot
+represent an arbitrary quantum state and is not a simulator**. It is a
+surrogate for a measurable quantity. Nothing here bears on whether it could
+replace simulation; it could not.
+
+**A prediction of mine was falsified.** I recorded before running that the
+braid layer would beat the transformer by LESS than the 1.54x it managed on
+knots, because far commutation is a weaker and more learnable symmetry than the
+braid relation. It is 3.7x -- larger, not smaller. The reasoning was that an
+easier symmetry should be easier to learn, and the measured commute ratios say
+the transformer does learn some of it. What I got wrong is that partial
+invariance is not worth much: 0.42 is a long way from 0.000, and the gap
+between "mostly respects the symmetry" and "cannot violate it" is where the
+extrapolation lives.
+
+### Two confounds caught before any result
+
+The first gate set was `{CZ, iSWAP}` and produced a **constant target** --
+`<Z_i> = 0.7071` for every qubit of every circuit, standard deviation exactly
+zero. The simulator was correct and the task was empty: CZ is diagonal so it
+cannot move any single-qubit `<Z>`, and iSWAP exchanges amplitudes between
+qubits that all start identical. CNOT fixes it.
+
+The second: at fixed depth, more qubits means fewer gates PER qubit, so the
+6-qubit column was an easier task rather than a harder one -- extrapolation
+initially "beat" interpolation, which is the signature of a benchmark measuring
+the wrong thing. `--scale-depth` holds gates-per-qubit constant at 1.75.
+
 ## Honest limits
 
 - **Absolute extrapolation R2 is 0.269.** Every model here is poor at
@@ -525,6 +787,16 @@ makes it a degenerate regression target.
 - **The optimum is one number on one setup.** Whether the best residual is fixed
   or scales with capacity or data is untested, and a fixed optimum would be a
   far stronger claim than this.
+- **The circuit gap has no established mechanism.** Depth, capacity and far
+  commutation are each ruled out as the explanation, the last by an
+  intervention that raised invariance without raising extrapolation. The
+  remaining hypothesis -- that the layer's per-qubit, one-step-per-gate
+  structure matches the computation -- is not isolated by this benchmark.
+- **The circuit layer is not a simulator** and cannot represent an entangled
+  state; it predicts a measurable quantity and nothing more. Its capacity sweep
+  is single-seed per configuration -- the three-seed replication covers the main
+  table, not the ten capacity rows -- so read the pattern across that sweep, not
+  any individual row. Circuit depth 4-18 and 4-6 qubits, one gate set.
 
 ## Files
 
@@ -537,6 +809,11 @@ makes it a degenerate regression target.
 | `trace_layer.py` | conjugation invariance by construction, via `tr(M^j)` |
 | `task_perm.py` | the same layer on permutation composition, no topology |
 | `scaling.py` | does the advantage survive more data and more parameters? |
+| `circuits.py` | exact statevector simulation of quantum circuits |
+| `task_circuit.py` | the same layer on circuits, with both transformer readouts |
+| `commute_probe.py` | measures far-commutation invariance directly |
+| `tf_capacity.py` | does transformer depth or width close the circuit gap? |
+| `commute_dose.py` | intervenes on far commutation at fixed capacity |
 | `figures.py` | the figures above, as dependency-free SVG |
 | `lessons.md` | the two earlier architectures and why they failed |
 | `semagram.py`, `loop_layer.py` | the earlier circular-attention layer |
