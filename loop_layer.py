@@ -93,6 +93,12 @@ class LoopCfg:
     norm_eps: float = 1e-6
     w_holo: float = 0.2
     vocab: int = 32
+    solver: str = "descent"   # "descent" = preconditioned explicit descent, as
+                              # shipped. "fb" = forward-backward splitting,
+                              # implicit in the circulant part. See solve.
+    k_jitter: int = 0         # if >0, sample K uniformly from
+                              # [k_steps, k_steps+k_jitter] each training step,
+                              # so the map cannot exploit one truncation.
     aniso: bool = False       # content-dependent local stiffness: the "ink
                               # density" term. Inhomogeneous around the loop
                               # while remaining exactly origin-free. See
@@ -509,12 +515,43 @@ def solve(p, c, clamp, cfg, extra=None, x0=None, trace=False):
     grad_x = jax.grad(lambda q, x, cc, cl: action(q, x, cc, cl, cfg, extra),
                       argnums=1)
 
+    # forward-backward: (I + eta*A)^{-1}, exact in Fourier
+    fb_inv = 1.0 / (1.0 + cfg.eta * g)
+
+    def rest_grad(x):
+        """Gradient of everything EXCEPT the circulant quadratic term."""
+        gr = jax.grad(lambda z: (s_rest(p, z, cfg)
+                                 + (s_aniso(p, z, cfg) if cfg.aniso else 0.0)
+                                 + (extra(z) if extra is not None else 0.0)))(x)
+        return gr + odd_apply(x, p, cfg) if cfg.odd_conv else gr
+
     def sweep(x, _):
-        field = grad_x(p, x, c, clamp)
-        if cfg.odd_conv:
-            field = field + odd_apply(x, p, cfg)   # non-conservative on purpose
-        gr = S.circulant(field, inv_geo, cfg.n) / jac
-        x = x - cfg.eta * gr
+        if cfg.solver == "fb":
+            # Implicit in the stiff convex part, explicit in the rest.
+            #
+            # x <- (I + eta A)^{-1} (x - eta grad S_rest(x))
+            #
+            # The explicit scheme needs eta*lambda(P H) < 2 for EVERY eigenvalue,
+            # and the Hessian here reaches +2304 while the preconditioner only
+            # undoes the circulant part (~0.37), so eta*lambda ~ 682 and the
+            # iteration cycles rather than descends -- which is why K=8 is
+            # optimal and K=32 is catastrophic. Splitting removes that
+            # constraint: A is inverted exactly in Fourier, so stability is
+            # limited only by the Lipschitz constant of grad S_rest, measured at
+            # ~3.4, i.e. eta < 0.59.
+            #
+            # This is also the proximal scheme CCCP was reaching for, without
+            # CCCP's requirement that the explicit part be concave -- it need
+            # only be Lipschitz, which matters because s_rest is 98.4% positive
+            # curvature under self-attention.
+            gr = rest_grad(x)
+            x = S.circulant(x - cfg.eta * gr, fb_inv, cfg.n)
+        else:
+            gr = grad_x(p, x, c, clamp)
+            if cfg.odd_conv:
+                gr = gr + odd_apply(x, p, cfg)
+            gr = S.circulant(gr, inv_geo, cfg.n) / jac
+            x = x - cfg.eta * gr
         if cfg.hard_clamp:
             x = keep * c + free * x
         return x, (jnp.sqrt(jnp.sum((free * gr) ** 2)) if trace else None)
