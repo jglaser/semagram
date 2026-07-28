@@ -385,6 +385,63 @@ What does survive is narrower than the recommendation was:
 - **Closure improves slightly** on identical data, 0.2098 against 0.2258.
 - **NLL gets clearly worse**, which is the metric the benchmark is about.
 
+# Part III: a symmetry that is worth building in
+
+Part II's verdict was that Semagram's commitments are exactly true and worth
+nothing. The sharpest single number in it: `tf-abs`, a transformer with learned
+absolute positions -- meaningless on a closed curve, its output moving 71% under
+a rotation with no geometric content -- beat every model that was right about
+the geometry, including the exactly-equivariant `tf-ring`.
+
+The proposed explanation was that cyclic shift is **too easy a symmetry to
+matter**: a flexible model learns it from data more cheaply than a rigid one
+imposes it. That explanation makes a prediction. Find a symmetry that is *hard*
+-- one with no cheap local statistic to fit -- and building it in should pay.
+
+Braid closures are that test. `braids.py` generates braid words and computes
+the Jones polynomial of their closures exactly, and `task_knot.py` regresses it
+from the word. Reidemeister equivalence has no local shortcut (the Jones
+polynomial is #P-hard in general), and it is exactly what a Yang-Baxter R-matrix
+gets for free.
+
+**mnist-style setup: three seeds, parameter-matched, trained on braids of length
+4-10 and tested on 12-16.**
+
+| model | params | YBE residual | test R2 | extrapolation R2 |
+|---|---|---|---|---|
+| `braid` | 34.2k | 1.15e-01 | 0.631 +/- 0.010 | 0.128 +/- 0.009 |
+| **`braid-ybe`** | 34.2k | **1.66e-02** | **0.681 +/- 0.005** | **0.186 +/- 0.012** |
+| `tf` | 32.8k | -- | 0.643 +/- 0.008 | 0.055 +/- 0.028 |
+
+Seed-matched extrapolation deltas against the transformer are +0.170, +0.148,
++0.076 -- positive on every seed, mean **+0.131**, a 3.4x ratio. In distribution
+the gap is +0.038 against seed spreads of 0.005 and 0.008.
+
+**The advantage splits in two, and both halves are measurable.** `tf` -> `braid`
+is +0.073 and is the architecture matching the generative process: the state is
+one vector per strand and a letter acts on two adjacent strands, which is what a
+braid does. `braid` -> `braid-ybe` is +0.058 and is the symmetry itself, since
+those two differ only by the Yang-Baxter penalty. So roughly 44% of the gain is
+Reidemeister invariance specifically rather than a better-shaped network.
+
+**And the gain is concentrated where a correct inductive bias should put it.**
+In distribution, where data is plentiful, the built-in symmetry is worth 0.038;
+extrapolating beyond the training range it is worth 0.131. A prior earns its
+keep exactly where the data runs out.
+
+This is the result Part II predicted and could not produce. Cyclic shift was too
+cheap to be worth imposing. Reidemeister equivalence is not, and the same
+question -- "does building the symmetry in beat learning it?" -- gets the
+opposite answer once the symmetry is hard enough to be worth having.
+
+Honest limits. Absolute extrapolation R2 is 0.186, so every model here is poor
+at generalising in crossing number and this is a comparison of degrees of
+failure. Three strands to four, lengths 4-16, one architecture family, one
+invariant. And the ground truth is verified two ways -- an exponential state sum
+and a polynomial-time Temperley-Lieb transfer, agreeing on 150 comparisons --
+because the Part II experience was that the benchmark is usually where the bug
+is.
+
 ## Result 10: content-dependent stiffness -- the one prediction that held
 
 The curvature stratification indicts the circulant prior specifically: it
