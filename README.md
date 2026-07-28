@@ -185,6 +185,67 @@ never the axis. A symmetry has to be **hard enough to be worth having** --
 Reidemeister, not cyclic shift -- and **imposed loosely enough to leave capacity
 behind**.
 
+## Train on 3 strands, run on 5
+
+Every other number here is a score on a fixed problem size. This one is a
+capability, and tying `R` is what makes it possible: the layer holds one map per
+sign and lifts it to whichever adjacent pair a letter names, so nothing in it is
+indexed by strand count.
+
+Trained on 3-strand braids only, `--knots-only` throughout:
+
+| model | 3 strands | 4 strands | 5 strands |
+|---|---|---|---|
+| **tied** | 0.952 | **0.553** | **0.363** |
+| untied | 0.968 | 0.261 | 0.146 |
+
+The tied layer keeps **38% of its in-distribution R2 at 5 strands**, and beats
+the untied control 2.1x at 4 and 2.5x at 5 -- while being slightly *worse* in
+distribution (0.952 against 0.968), so this is not a capacity effect. Untied
+degrades as the algebra requires: `R[sigma_3]` never receives a gradient.
+
+**A transformer cannot be run in this column at all.** Its input is a token per
+generator, so a 5-strand word contains symbols whose embedding rows do not exist
+in a model trained on 3 strands. This is not a beaten baseline; it is a
+direction the comparison cannot be made in.
+
+This benchmark was confounded on the first attempt, by me. The closure of an
+`s`-strand braid has as many components as its permutation has cycles, so
+raising the strand count changes *what the target is*: 1.88 components at 3
+strands against 2.77 at 5, with Jones values 3.15x more spread under 3-strand
+normalisation. Scored that way the tied model appeared to collapse (0.932 ->
+0.063) and the untied control appeared to do *better*, which is impossible and
+is what prompted the check. `--knots-only` keeps single-component closures at
+every strand count, and each test set is now scored both against the training
+normalisation and against its own variance so any residual shift stays visible.
+
+## What more symmetry buys: nothing, and why
+
+The dose-response is monotone up to `w = 10`, so the natural next step is more
+of the right invariance. Markov's theorem says closure equivalence needs
+conjugation and stabilisation on top of the braid relations, and the readout
+provides neither. Measured, against the tied `d = 32` baseline at 0.267:
+
+| | extrapolation R2 | delta |
+|---|---|---|
+| tied baseline | 0.267 +/- 0.000 (n=2) | -- |
+| + Reidemeister II (`w_inv = 1`) | 0.276 | +0.009 |
+| + conjugation (`w_conj = 1`) | 0.252 | -0.015 |
+| + conjugation (`w_conj = 10`) | 0.210 | **-0.057** |
+| + both | 0.196 | -0.071 |
+
+**Conjugation hurts, and worse the harder it is pushed.** The reason is
+structural rather than a tuning failure: mean pooling has no cyclic property, so
+conjugation invariance is a property this readout *cannot have*. The only way to
+reduce `||f(a b a^-1) - f(b)||` is to become insensitive to the added letters --
+that is, more constant. **A penalty cannot install a property the architecture
+forbids; it can only buy it with capacity.**
+
+So the fix is not a weight. The readout has to become genuinely trace-like, and
+until it does, the conjugation half of Markov's theorem is unavailable no matter
+what it is charged. Reidemeister II's +0.009 on one seed is not a result either
+way.
+
 ## Getting the baseline right
 
 Two baselines had to be discarded first, and both flattered the layer.
